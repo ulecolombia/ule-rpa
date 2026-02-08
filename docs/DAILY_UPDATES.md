@@ -320,6 +320,38 @@ AWS_S3_BUCKET=ule-rpa-files
 - `src/orchestrator/worker.ts` (+256 líneas netas)
 - `src/orchestrator/scheduler.ts` (+100 líneas)
 
+**PARTE 3: Queue Config**
+**Commits**: `30c0140`
+
+**Archivo**: `src/orchestrator/queue.config.ts`
+
+**Implementado**:
+- ✅ Actualización de `addComprobanteTask()` (líneas 136-151)
+- ✅ Timeout aumentado: 3 minutos → 5 minutos
+- ✅ JobId mejorado: `comprobante-${numeroPlanilla}-${timestamp}`
+- ✅ Priority: 7 (default para llamadas manuales)
+- ✅ Logger mejorado: incluye numeroPlanilla
+- ✅ DefaultTimeout actualizado en `addTaskToQueue()` para consistencia
+
+**Razón de Cambios**:
+- **Timeout 5 min**: Descarga de comprobantes puede tardar más (dependiendo de tamaño PDF)
+- **JobId con numeroPlanilla**: Más descriptivo y único por planilla (vs uleUserId)
+- **Consistencia**: Ambas funciones (addComprobanteTask y addTaskToQueue) usan mismo timeout
+
+**Configuración Final**:
+```typescript
+export async function addComprobanteTask(data: TaskInput): Promise<Job> {
+  return taskQueue.add('comprobante', data, {
+    priority: data.priority || 7,        // Default 7 (scheduler usa 4)
+    timeout: 5 * 60 * 1000,             // 5 minutos
+    jobId: `comprobante-${data.numeroPlanilla}-${Date.now()}`,
+  });
+}
+```
+
+**Archivos**:
+- `src/orchestrator/queue.config.ts` (actualizado)
+
 ---
 
 ### ✅ Fase 3: Liquidación de PILA - COMPLETADA

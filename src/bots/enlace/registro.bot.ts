@@ -5,211 +5,266 @@
 
 import { Page } from 'puppeteer';
 import { logger } from '../../utils/logger';
-import { UserData, BotResponse, EnlaceRegistroResult } from '../../types';
-import { SELECTORS, URL_PATTERNS } from '../utils/selectors';
-import {
-  waitAndClick,
-  waitAndType,
-  sleep,
-  elementExists,
-  selectOption,
-  randomDelay,
-  scrollToElement,
-} from '../utils/wait';
-import { browserManager } from '../utils/browser';
-import { BotError } from '../../utils/errors';
 import { enlaceAuth } from './auth.bot';
-import { usuarioExisteEnlace } from './search.bot';
+import { buscarUsuario } from './search.bot';
+import { waitAndType, waitAndClick, sleep, elementExists, randomDelay } from '../utils/wait';
+import { SELECTORS, URL_PATTERNS } from '../utils/selectors';
+import { browserManager } from '../utils/browser';
+import { config } from '../../utils/config';
+import { UserData } from '../../types';
+import { BotError } from '../../utils/errors';
 
 /**
- * Registration Bot Class
- * Manages user registration flow in Enlace Operativo
+ * Registration result interface
  */
-export class EnlaceRegistroBot {
-  /**
-   * Register a new user in Enlace Operativo
-   * @param userData - Complete user information from ULE
-   * @returns Registration result with enlaceUserId
-   */
-  async registrarUsuario(userData: UserData): Promise<BotResponse<EnlaceRegistroResult>> {
-    const startTime = Date.now();
+export interface RegistroResult {
+  success: boolean;
+  enlaceUserId?: string;
+  alreadyExists?: boolean;
+  error?: string;
+  warnings?: string[];
+}
 
-    logger.info('Starting user registration in Enlace', {
-      documento: userData.numeroDocumento,
-      nombre: userData.nombre,
-    });
+/**
+ * Validate user data before registration
+ */
+function validateUserData(userData: UserData): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
 
-    // Get authenticated page
-    const page = await enlaceAuth.ensureAuthenticated();
+  // Required fields
+  if (!userData.numeroDocumento || userData.numeroDocumento.trim().length === 0) {
+    errors.push('numeroDocumento is required');
+  }
 
-    try {
-      // 1. Check if user already exists
-      logger.info('Checking if user already exists');
-      const yaExiste = await usuarioExisteEnlace(page, userData.numeroDocumento);
+  if (!userData.nombre || userData.nombre.trim().length === 0) {
+    errors.push('nombre is required');
+  }
 
-      if (yaExiste) {
-        logger.warn('User already exists in Enlace, skipping registration', {
-          documento: userData.numeroDocumento,
-        });
+  if (!userData.tipoDocumento) {
+    errors.push('tipoDocumento is required');
+  }
 
-        return {
-          success: true,
-          data: {
-            registered: false,
-            error: 'User already exists in Enlace',
-          },
-          duration: Date.now() - startTime,
-        };
-      }
+  // Validate documento length
+  if (userData.numeroDocumento && userData.numeroDocumento.length < 6) {
+    errors.push('numeroDocumento must be at least 6 characters');
+  }
 
-      // 2. Navigate to Aportantes section
-      logger.info('Navigating to Aportantes section');
-      await this.navigateToAportantes(page);
+  // Validate email format (basic)
+  if (userData.email && !userData.email.includes('@')) {
+    errors.push('email format is invalid');
+  }
 
-      // 3. Click "Add new aportante" button
-      logger.info('Opening registration form');
-      await this.openRegistrationForm(page);
+  // Validate phone (basic)
+  if (userData.telefono && userData.telefono.length < 7) {
+    errors.push('telefono must be at least 7 characters');
+  }
 
-      // 4. Fill registration form
-      logger.info('Filling registration form');
-      await this.fillRegistrationForm(page, userData);
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
 
-      // 5. Submit form
-      logger.info('Submitting registration form');
-      await this.submitRegistrationForm(page);
+/**
+ * Register a new user in Enlace Operativo
+ * @param userData - Complete user information
+ * @returns Registration result
+ */
+export async function registrarUsuario(userData: UserData): Promise<RegistroResult> {
+  logger.info('Starting user registration in Enlace', {
+    documento: userData.numeroDocumento,
+    nombre: userData.nombre,
+  });
 
-      // 6. Verify success
-      logger.info('Verifying registration success');
-      const registrationResult = await this.verifyRegistrationSuccess(page, userData);
+  // 1. Validate user data
+  const validation = validateUserData(userData);
+  if (!validation.valid) {
+    logger.error('User data validation failed', { errors: validation.errors });
+    return {
+      success: false,
+      error: `Validation failed: ${validation.errors.join(', ')}`,
+    };
+  }
 
-      logger.info('✅ User registration completed successfully', {
+  try {
+    // 2. Check if user already exists
+    logger.info('Checking if user already exists');
+    const searchResult = await buscarUsuario(userData.numeroDocumento);
+
+    if (searchResult.found) {
+      logger.info('User already exists in Enlace', {
         documento: userData.numeroDocumento,
-        enlaceUserId: registrationResult.enlaceUserId,
+        enlaceUserId: searchResult.enlaceUserId,
       });
 
       return {
         success: true,
-        data: registrationResult,
-        duration: Date.now() - startTime,
+        alreadyExists: true,
+        enlaceUserId: searchResult.enlaceUserId,
       };
-    } catch (error) {
-      logger.error('❌ User registration failed', {
-        error,
-        documento: userData.numeroDocumento,
-      });
+    }
 
-      const screenshot = await browserManager.takeScreenshot(page, 'registro-error');
+    // 3. Get authenticated page
+    const page = await enlaceAuth.ensureAuthenticated();
+
+    // 4. Navigate to Administrar Aportantes
+    logger.info('Navigating to Administrar Aportantes');
+    const enlaceBaseUrl = config.enlace?.baseUrl || URL_PATTERNS.BASE;
+    const aportantesUrl = `${enlaceBaseUrl}/gestion/#/home/administrar-aportantes`;
+
+    await page.goto(aportantesUrl, {
+      waitUntil: 'networkidle0',
+      timeout: 30000,
+    });
+
+    await sleep(2000);
+    await browserManager.takeScreenshot(page, 'registro-aportantes-page');
+
+    // 5. Click "Add new user" button
+    logger.info('Looking for "Add user" button');
+
+    // Try multiple possible selectors for the add button
+    const addButtonSelectors = [
+      SELECTORS.APORTANTES.AGREGAR_BUTTON,
+      SELECTORS.APORTANTES.AGREGAR_APORTANTE,
+      SELECTORS.APORTANTES.NUEVO_APORTANTE,
+    ];
+
+    let buttonClicked = false;
+    for (const selector of addButtonSelectors) {
+      const exists = await elementExists(page, selector);
+      if (exists) {
+        logger.info('Clicking add button', { selector });
+        await waitAndClick(page, selector);
+        buttonClicked = true;
+        break;
+      }
+    }
+
+    if (!buttonClicked) {
+      logger.error('Add user button not found');
+      await browserManager.takeScreenshot(page, 'registro-no-add-button');
+      throw new BotError('Could not find "Add user" button on page');
+    }
+
+    // 6. Wait for registration form to load
+    logger.info('Waiting for registration form');
+    await sleep(2000);
+
+    // Check if form appeared
+    const formExists = await elementExists(page, SELECTORS.APORTANTES.FORM.NUMERO_DOC);
+    if (!formExists) {
+      logger.error('Registration form did not appear');
+      await browserManager.takeScreenshot(page, 'registro-no-form');
+      throw new BotError('Registration form did not appear');
+    }
+
+    logger.info('Registration form loaded successfully');
+    await browserManager.takeScreenshot(page, 'registro-form-loaded');
+
+    // 7. Fill registration form
+    await fillRegistrationForm(page, userData);
+
+    // 8. Screenshot before submitting
+    await browserManager.takeScreenshot(page, 'registro-before-submit');
+
+    // 9. Submit form
+    logger.info('Submitting registration form');
+    const submitSuccess = await submitRegistrationForm(page);
+
+    if (!submitSuccess) {
+      throw new BotError('Form submission failed or was rejected');
+    }
+
+    // 10. Wait for confirmation
+    logger.info('Waiting for registration confirmation');
+    await sleep(3000);
+    await browserManager.takeScreenshot(page, 'registro-after-submit');
+
+    // 11. Check for success or error messages
+    const result = await checkRegistrationResult(page);
+
+    if (!result.success) {
+      await browserManager.takeScreenshot(page, 'registro-error-message');
+      throw new BotError(result.error || 'Registration failed');
+    }
+
+    // 12. Verify user was created by searching for them
+    logger.info('Verifying user registration');
+    await sleep(2000);
+
+    const verifyResult = await buscarUsuario(userData.numeroDocumento);
+
+    if (!verifyResult.found) {
+      logger.warn('User registered but not found in search (may need time to sync)');
+      await browserManager.takeScreenshot(page, 'registro-verification-failed');
 
       return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown registration error',
-        screenshot,
-        duration: Date.now() - startTime,
+        success: true,
+        alreadyExists: false,
+        warnings: ['User registered but could not be found in search immediately'],
       };
     }
+
+    logger.info('✅ User registration completed successfully', {
+      documento: userData.numeroDocumento,
+      enlaceUserId: verifyResult.enlaceUserId,
+      nombre: verifyResult.nombre,
+    });
+
+    return {
+      success: true,
+      enlaceUserId: verifyResult.enlaceUserId,
+      alreadyExists: false,
+    };
+  } catch (error) {
+    logger.error('❌ Error registering user', {
+      documento: userData.numeroDocumento,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
   }
+}
 
-  /**
-   * Navigate to Aportantes section
-   */
-  private async navigateToAportantes(page: Page): Promise<void> {
-    try {
-      // Try clicking menu item first
-      const menuItemExists = await elementExists(page, SELECTORS.APORTANTES.MENU_ITEM);
-      if (menuItemExists) {
-        await waitAndClick(page, SELECTORS.APORTANTES.MENU_ITEM);
-        await sleep(1000);
-      } else {
-        // Navigate directly to URL
-        logger.debug('Menu item not found, navigating to URL');
-        await page.goto(URL_PATTERNS.APORTANTES, {
-          waitUntil: 'networkidle2',
-          timeout: 30000,
-        });
-      }
+/**
+ * Fill the registration form with user data
+ */
+async function fillRegistrationForm(page: Page, userData: UserData): Promise<void> {
+  logger.info('Filling registration form');
 
-      await randomDelay(1000, 2000);
-      await browserManager.takeScreenshot(page, 'aportantes-section');
-    } catch (error) {
-      throw new BotError('Failed to navigate to Aportantes section');
-    }
-  }
-
-  /**
-   * Open registration form by clicking "Add" button
-   */
-  private async openRegistrationForm(page: Page): Promise<void> {
-    try {
-      await browserManager.takeScreenshot(page, 'before-add-button');
-
-      // Try multiple possible button selectors
-      const addButtonSelectors = [
-        SELECTORS.APORTANTES.AGREGAR_APORTANTE,
-        SELECTORS.APORTANTES.NUEVO_APORTANTE,
-        SELECTORS.APORTANTES.AGREGAR_BUTTON,
-      ];
-
-      let buttonClicked = false;
-
-      for (const selector of addButtonSelectors) {
-        const buttonExists = await elementExists(page, selector);
-        if (buttonExists) {
-          logger.debug('Clicking add button', { selector });
-          await waitAndClick(page, selector);
-          buttonClicked = true;
-          break;
-        }
-      }
-
-      if (!buttonClicked) {
-        throw new BotError('Add aportante button not found');
-      }
-
-      // Wait for form to appear
-      await sleep(2000);
-      await browserManager.takeScreenshot(page, 'registration-form-opened');
-
-      // Verify form is visible
-      const formVisible = await elementExists(page, SELECTORS.APORTANTES.FORM.NUMERO_DOC);
-      if (!formVisible) {
-        throw new BotError('Registration form did not appear');
-      }
-
-      logger.debug('Registration form opened successfully');
-    } catch (error) {
-      throw new BotError('Failed to open registration form');
-    }
-  }
-
-  /**
-   * Fill registration form with user data
-   */
-  private async fillRegistrationForm(page: Page, userData: UserData): Promise<void> {
-    try {
-      await browserManager.takeScreenshot(page, 'form-before-fill');
-
-      // 1. Tipo de documento
-      logger.debug('Selecting document type', { tipo: userData.tipoDocumento });
-      const tipoDocExists = await elementExists(page, SELECTORS.APORTANTES.FORM.TIPO_DOC);
-      if (tipoDocExists) {
-        await selectOption(page, SELECTORS.APORTANTES.FORM.TIPO_DOC, userData.tipoDocumento);
-        await randomDelay(300, 500);
-      }
-
-      // 2. Número de documento
-      logger.debug('Entering document number');
-      await waitAndType(
-        page,
-        SELECTORS.APORTANTES.FORM.NUMERO_DOC,
-        userData.numeroDocumento,
-        { clear: true, delay: 100 }
-      );
+  try {
+    // Tipo de documento
+    logger.debug('Selecting document type', { tipo: userData.tipoDocumento });
+    const tipoDocExists = await elementExists(page, SELECTORS.APORTANTES.FORM.TIPO_DOC);
+    if (tipoDocExists) {
+      await page.select(SELECTORS.APORTANTES.FORM.TIPO_DOC, userData.tipoDocumento);
       await randomDelay(300, 500);
+    }
 
-      // 3. Handle name fields (could be single "nombre" or split into primer/segundo nombre/apellido)
-      await this.fillNameFields(page, userData);
+    // Número de documento
+    logger.debug('Entering document number');
+    await waitAndType(
+      page,
+      SELECTORS.APORTANTES.FORM.NUMERO_DOC,
+      userData.numeroDocumento,
+      { clear: true, delay: 100 }
+    );
+    await randomDelay(300, 500);
 
-      // 4. Email
+    // Nombre completo
+    logger.debug('Entering full name');
+    await waitAndType(page, SELECTORS.APORTANTES.FORM.NOMBRE, userData.nombre, {
+      clear: true,
+      delay: 80,
+    });
+    await randomDelay(300, 500);
+
+    // Email
+    if (userData.email) {
       logger.debug('Entering email');
       const emailExists = await elementExists(page, SELECTORS.APORTANTES.FORM.EMAIL);
       if (emailExists) {
@@ -219,8 +274,10 @@ export class EnlaceRegistroBot {
         });
         await randomDelay(300, 500);
       }
+    }
 
-      // 5. Teléfono
+    // Teléfono
+    if (userData.telefono) {
       logger.debug('Entering phone');
       const telefonoExists = await elementExists(page, SELECTORS.APORTANTES.FORM.TELEFONO);
       const celularExists = await elementExists(page, SELECTORS.APORTANTES.FORM.CELULAR);
@@ -237,8 +294,10 @@ export class EnlaceRegistroBot {
         });
       }
       await randomDelay(300, 500);
+    }
 
-      // 6. Dirección
+    // Dirección
+    if (userData.direccion) {
       logger.debug('Entering address');
       const direccionExists = await elementExists(page, SELECTORS.APORTANTES.FORM.DIRECCION);
       if (direccionExists) {
@@ -248,38 +307,19 @@ export class EnlaceRegistroBot {
         });
         await randomDelay(300, 500);
       }
+    }
 
-      // 7. Ciudad
+    // Ciudad
+    if (userData.ciudad) {
       logger.debug('Entering city');
       const ciudadExists = await elementExists(page, SELECTORS.APORTANTES.FORM.CIUDAD);
       if (ciudadExists) {
-        // Could be input or select - check element type
-        const isSelect = await page.$eval(
-          SELECTORS.APORTANTES.FORM.CIUDAD,
-          (el) => el.tagName === 'SELECT'
-        );
-
-        if (isSelect) {
-          // Try to select by text or value
-          await page.evaluate(
-            (selector, city) => {
-              const select = document.querySelector(selector) as HTMLSelectElement;
-              if (select) {
-                // Try to find option by text
-                const options = Array.from(select.options);
-                const option = options.find((opt) =>
-                  opt.text.toLowerCase().includes(city.toLowerCase())
-                );
-                if (option) {
-                  select.value = option.value;
-                }
-              }
-            },
-            SELECTORS.APORTANTES.FORM.CIUDAD,
-            userData.ciudad
-          );
-        } else {
-          // It's an input field
+        try {
+          // Try as select first
+          await page.select(SELECTORS.APORTANTES.FORM.CIUDAD, userData.ciudad);
+        } catch {
+          // If fails, try as text input
+          logger.debug('City selector failed, trying as text input');
           await waitAndType(page, SELECTORS.APORTANTES.FORM.CIUDAD, userData.ciudad, {
             clear: true,
             delay: 80,
@@ -287,397 +327,195 @@ export class EnlaceRegistroBot {
         }
         await randomDelay(300, 500);
       }
+    }
 
-      // 8. EPS (Salud)
+    // EPS
+    if (userData.eps) {
       logger.debug('Selecting EPS', { eps: userData.eps });
       const epsExists = await elementExists(page, SELECTORS.APORTANTES.FORM.EPS);
       if (epsExists) {
-        await this.selectByPartialMatch(page, SELECTORS.APORTANTES.FORM.EPS, userData.eps);
-        await randomDelay(500, 800);
+        try {
+          await page.select(SELECTORS.APORTANTES.FORM.EPS, userData.eps);
+          await randomDelay(500, 800);
+        } catch (error) {
+          logger.warn('Could not select EPS', { error });
+        }
       }
+    }
 
-      // 9. Pensión
-      logger.debug('Selecting Pension', { pension: userData.pension });
+    // Fondo de Pensión
+    if (userData.pension) {
+      logger.debug('Selecting pension fund', { pension: userData.pension });
       const pensionExists = await elementExists(page, SELECTORS.APORTANTES.FORM.PENSION);
       const afpExists = await elementExists(page, SELECTORS.APORTANTES.FORM.AFP);
 
       if (pensionExists) {
-        await this.selectByPartialMatch(
-          page,
-          SELECTORS.APORTANTES.FORM.PENSION,
-          userData.pension
-        );
+        try {
+          await page.select(SELECTORS.APORTANTES.FORM.PENSION, userData.pension);
+          await randomDelay(500, 800);
+        } catch (error) {
+          logger.warn('Could not select pension fund', { error });
+        }
       } else if (afpExists) {
-        await this.selectByPartialMatch(page, SELECTORS.APORTANTES.FORM.AFP, userData.pension);
+        try {
+          await page.select(SELECTORS.APORTANTES.FORM.AFP, userData.pension);
+          await randomDelay(500, 800);
+        } catch (error) {
+          logger.warn('Could not select AFP', { error });
+        }
       }
-      await randomDelay(500, 800);
+    }
 
-      // 10. ARL
+    // ARL
+    if (userData.arl) {
       logger.debug('Selecting ARL', { arl: userData.arl });
       const arlExists = await elementExists(page, SELECTORS.APORTANTES.FORM.ARL);
       if (arlExists) {
-        await this.selectByPartialMatch(page, SELECTORS.APORTANTES.FORM.ARL, userData.arl);
-        await randomDelay(500, 800);
-      }
-
-      // 11. Caja de Compensación (if exists)
-      const cajaExists = await elementExists(page, SELECTORS.APORTANTES.FORM.CAJA_COMPENSACION);
-      if (cajaExists) {
-        logger.debug('Caja de compensación field found, skipping (optional)');
-        // Usually optional, skip for now
-      }
-
-      await browserManager.takeScreenshot(page, 'form-after-fill');
-      logger.info('✅ Form filled successfully');
-    } catch (error) {
-      logger.error('Error filling registration form', { error });
-      await browserManager.takeScreenshot(page, 'form-fill-error');
-      throw new BotError('Failed to fill registration form');
-    }
-  }
-
-  /**
-   * Handle name fields (could be single or split)
-   */
-  private async fillNameFields(page: Page, userData: UserData): Promise<void> {
-    // Check if form has split name fields
-    const primerNombreExists = await elementExists(page, SELECTORS.APORTANTES.FORM.PRIMER_NOMBRE);
-
-    if (primerNombreExists) {
-      // Split name into parts
-      const nameParts = this.splitFullName(userData.nombre);
-
-      logger.debug('Entering split name fields', nameParts);
-
-      // Primer Nombre
-      await waitAndType(
-        page,
-        SELECTORS.APORTANTES.FORM.PRIMER_NOMBRE,
-        nameParts.primerNombre,
-        { clear: true, delay: 80 }
-      );
-      await randomDelay(200, 400);
-
-      // Segundo Nombre (optional)
-      const segundoNombreExists = await elementExists(
-        page,
-        SELECTORS.APORTANTES.FORM.SEGUNDO_NOMBRE
-      );
-      if (segundoNombreExists && nameParts.segundoNombre) {
-        await waitAndType(
-          page,
-          SELECTORS.APORTANTES.FORM.SEGUNDO_NOMBRE,
-          nameParts.segundoNombre,
-          { clear: true, delay: 80 }
-        );
-        await randomDelay(200, 400);
-      }
-
-      // Primer Apellido
-      await waitAndType(
-        page,
-        SELECTORS.APORTANTES.FORM.PRIMER_APELLIDO,
-        nameParts.primerApellido,
-        { clear: true, delay: 80 }
-      );
-      await randomDelay(200, 400);
-
-      // Segundo Apellido (optional)
-      const segundoApellidoExists = await elementExists(
-        page,
-        SELECTORS.APORTANTES.FORM.SEGUNDO_APELLIDO
-      );
-      if (segundoApellidoExists && nameParts.segundoApellido) {
-        await waitAndType(
-          page,
-          SELECTORS.APORTANTES.FORM.SEGUNDO_APELLIDO,
-          nameParts.segundoApellido,
-          { clear: true, delay: 80 }
-        );
-        await randomDelay(200, 400);
-      }
-    } else {
-      // Single name field
-      const nombreExists = await elementExists(page, SELECTORS.APORTANTES.FORM.NOMBRE);
-      if (nombreExists) {
-        logger.debug('Entering full name in single field');
-        await waitAndType(page, SELECTORS.APORTANTES.FORM.NOMBRE, userData.nombre, {
-          clear: true,
-          delay: 80,
-        });
-        await randomDelay(300, 500);
-      }
-    }
-  }
-
-  /**
-   * Split full name into parts
-   * Format: "Primer Nombre Segundo Nombre Primer Apellido Segundo Apellido"
-   */
-  private splitFullName(fullName: string): {
-    primerNombre: string;
-    segundoNombre?: string;
-    primerApellido: string;
-    segundoApellido?: string;
-  } {
-    const parts = fullName.trim().split(/\s+/);
-
-    if (parts.length === 2) {
-      // "Nombre Apellido"
-      return {
-        primerNombre: parts[0],
-        primerApellido: parts[1],
-      };
-    } else if (parts.length === 3) {
-      // "Nombre Apellido1 Apellido2" or "Nombre1 Nombre2 Apellido"
-      return {
-        primerNombre: parts[0],
-        primerApellido: parts[1],
-        segundoApellido: parts[2],
-      };
-    } else if (parts.length >= 4) {
-      // "Nombre1 Nombre2 Apellido1 Apellido2"
-      return {
-        primerNombre: parts[0],
-        segundoNombre: parts[1],
-        primerApellido: parts[2],
-        segundoApellido: parts.slice(3).join(' '), // Join remaining parts
-      };
-    } else {
-      // Single name
-      return {
-        primerNombre: fullName,
-        primerApellido: fullName,
-      };
-    }
-  }
-
-  /**
-   * Select option by partial text match (useful for long option names)
-   */
-  private async selectByPartialMatch(
-    page: Page,
-    selector: string,
-    partialText: string
-  ): Promise<void> {
-    try {
-      await page.evaluate(
-        (sel, text) => {
-          const select = document.querySelector(sel) as HTMLSelectElement;
-          if (!select) return;
-
-          const options = Array.from(select.options);
-          const normalizedText = text.toLowerCase().trim();
-
-          // Try exact match first
-          let option = options.find((opt) => opt.text.toLowerCase().trim() === normalizedText);
-
-          // Try partial match
-          if (!option) {
-            option = options.find((opt) => opt.text.toLowerCase().includes(normalizedText));
-          }
-
-          // Try value match
-          if (!option) {
-            option = options.find((opt) => opt.value.toLowerCase().includes(normalizedText));
-          }
-
-          if (option) {
-            select.value = option.value;
-            // Trigger change event
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-          } else {
-            console.warn(`No option found matching: ${text}`);
-          }
-        },
-        selector,
-        partialText
-      );
-    } catch (error) {
-      logger.warn('Error selecting option by partial match', { selector, partialText, error });
-    }
-  }
-
-  /**
-   * Submit registration form
-   */
-  private async submitRegistrationForm(page: Page): Promise<void> {
-    try {
-      await browserManager.takeScreenshot(page, 'before-submit');
-
-      // Try multiple submit button selectors
-      const submitSelectors = [
-        SELECTORS.APORTANTES.FORM.GUARDAR_TEXT,
-        SELECTORS.APORTANTES.FORM.GUARDAR,
-      ];
-
-      let buttonClicked = false;
-
-      for (const selector of submitSelectors) {
-        const buttonExists = await elementExists(page, selector);
-        if (buttonExists) {
-          logger.debug('Clicking submit button', { selector });
-          await scrollToElement(page, selector);
-          await randomDelay(500, 1000);
-          await waitAndClick(page, selector);
-          buttonClicked = true;
-          break;
+        try {
+          await page.select(SELECTORS.APORTANTES.FORM.ARL, userData.arl);
+          await randomDelay(500, 800);
+        } catch (error) {
+          logger.warn('Could not select ARL', { error });
         }
       }
-
-      if (!buttonClicked) {
-        throw new BotError('Submit button not found');
-      }
-
-      // Wait for form submission
-      logger.info('Waiting for form submission...');
-      await sleep(3000);
-
-      await browserManager.takeScreenshot(page, 'after-submit');
-    } catch (error) {
-      throw new BotError('Failed to submit registration form');
     }
-  }
 
-  /**
-   * Verify registration success
-   */
-  private async verifyRegistrationSuccess(
-    page: Page,
-    userData: UserData
-  ): Promise<EnlaceRegistroResult> {
-    try {
-      // Check for success message
-      const successExists = await elementExists(page, SELECTORS.COMMON.ALERT_SUCCESS);
-      const toastSuccessExists = await elementExists(page, SELECTORS.COMMON.TOAST_SUCCESS);
-
-      if (successExists || toastSuccessExists) {
-        logger.info('✅ Success message detected');
-
-        // Wait a bit for any navigation
-        await sleep(2000);
-
-        // Try to extract enlaceUserId (implementation depends on actual UI)
-        const enlaceUserId = await this.extractEnlaceUserId(page, userData);
-
-        await browserManager.takeScreenshot(page, 'registration-success');
-
-        return {
-          registered: true,
-          enlaceUserId,
-        };
-      }
-
-      // Check for error message
-      const errorExists = await elementExists(page, SELECTORS.COMMON.ALERT_ERROR);
-      const toastErrorExists = await elementExists(page, SELECTORS.COMMON.TOAST_ERROR);
-
-      if (errorExists || toastErrorExists) {
-        const errorSelector = errorExists
-          ? SELECTORS.COMMON.ALERT_ERROR
-          : SELECTORS.COMMON.TOAST_ERROR;
-
-        const errorText = await page.$eval(errorSelector, (el) => el.textContent || '');
-
-        logger.error('❌ Error message detected', { error: errorText });
-        await browserManager.takeScreenshot(page, 'registration-error-message');
-
-        throw new BotError(`Registration failed: ${errorText}`);
-      }
-
-      // No clear success or error - check if we're back on the list
-      await sleep(2000);
-      const currentUrl = page.url();
-
-      if (currentUrl.includes('aportantes') || currentUrl.includes('administrar')) {
-        logger.info('Redirected to aportantes list - assuming success');
-
-        const enlaceUserId = await this.extractEnlaceUserId(page, userData);
-
-        return {
-          registered: true,
-          enlaceUserId,
-        };
-      }
-
-      // Uncertain result
-      logger.warn('Cannot determine registration result clearly');
-      await browserManager.takeScreenshot(page, 'registration-uncertain');
-
-      return {
-        registered: true, // Assume success if no error
-        warnings: ['Could not verify registration success clearly'],
-      };
-    } catch (error) {
-      if (error instanceof BotError) {
-        throw error;
-      }
-      throw new BotError('Failed to verify registration success');
-    }
-  }
-
-  /**
-   * Extract enlaceUserId after successful registration
-   * This is highly dependent on the actual UI - may need adjustment
-   */
-  private async extractEnlaceUserId(page: Page, userData: UserData): Promise<string | undefined> {
-    try {
-      // Strategy 1: Search for the user we just created
-      logger.debug('Attempting to extract enlaceUserId by searching for user');
-
-      const searchInputExists = await elementExists(page, SELECTORS.APORTANTES.BUSCAR_INPUT);
-      if (searchInputExists) {
-        await waitAndType(
-          page,
-          SELECTORS.APORTANTES.BUSCAR_INPUT,
-          userData.numeroDocumento,
-          { clear: true }
-        );
-        await page.keyboard.press('Enter');
-        await sleep(2000);
-
-        // Try to extract from table row
-        const rowExists = await elementExists(page, SELECTORS.APORTANTES.RESULTS.ROW);
-        if (rowExists) {
-          const userId = await page.$eval(
-            SELECTORS.APORTANTES.RESULTS.ROW,
-            (el) => el.getAttribute('data-user-id') || el.getAttribute('data-id')
-          );
-
-          if (userId) {
-            logger.info('Extracted enlaceUserId from table', { userId });
-            return userId;
-          }
-        }
-      }
-
-      // Strategy 2: Check URL for ID
-      const url = page.url();
-      const idMatch = url.match(/id[=/](\d+)/i);
-      if (idMatch) {
-        logger.info('Extracted enlaceUserId from URL', { userId: idMatch[1] });
-        return idMatch[1];
-      }
-
-      logger.debug('Could not extract enlaceUserId');
-      return undefined;
-    } catch (error) {
-      logger.warn('Error extracting enlaceUserId', { error });
-      return undefined;
-    }
+    logger.info('✅ Form filled successfully');
+  } catch (error) {
+    logger.error('Error filling registration form', { error });
+    await browserManager.takeScreenshot(page, 'registro-fill-error');
+    throw new BotError('Failed to fill registration form');
   }
 }
 
 /**
- * Singleton instance
+ * Submit the registration form
  */
-export const enlaceRegistro = new EnlaceRegistroBot();
+async function submitRegistrationForm(page: Page): Promise<boolean> {
+  try {
+    // Try multiple possible submit button selectors
+    const submitSelectors = [
+      SELECTORS.APORTANTES.FORM.GUARDAR,
+      SELECTORS.APORTANTES.FORM.GUARDAR_TEXT,
+    ];
+
+    let buttonClicked = false;
+    for (const selector of submitSelectors) {
+      const exists = await elementExists(page, selector);
+      if (exists) {
+        logger.debug('Clicking submit button', { selector });
+        await waitAndClick(page, selector);
+        buttonClicked = true;
+        break;
+      }
+    }
+
+    if (!buttonClicked) {
+      logger.error('Submit button not found');
+      return false;
+    }
+
+    // Wait for submission to process
+    await sleep(3000);
+
+    return true;
+  } catch (error) {
+    logger.error('Error submitting form', { error });
+    return false;
+  }
+}
 
 /**
- * Quick function for registering a user
+ * Check registration result (success or error messages)
  */
-export async function registrarUsuarioEnlace(
-  userData: UserData
-): Promise<BotResponse<EnlaceRegistroResult>> {
-  return enlaceRegistro.registrarUsuario(userData);
+async function checkRegistrationResult(
+  page: Page
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Check for success messages
+    const successSelectors = [
+      SELECTORS.COMMON.ALERT_SUCCESS,
+      SELECTORS.COMMON.TOAST_SUCCESS,
+    ];
+
+    for (const selector of successSelectors) {
+      const exists = await elementExists(page, selector);
+      if (exists) {
+        logger.info('Success message detected');
+        return { success: true };
+      }
+    }
+
+    // Check for error messages
+    const errorSelectors = [
+      SELECTORS.COMMON.ALERT_ERROR,
+      SELECTORS.COMMON.TOAST_ERROR,
+      '.error',
+      '.alert-danger',
+      '[role="alert"]',
+    ];
+
+    for (const selector of errorSelectors) {
+      const exists = await elementExists(page, selector);
+      if (exists) {
+        try {
+          const errorText = await page.$eval(selector, (el) => el.textContent || '');
+          logger.error('Error message detected', { error: errorText });
+          return {
+            success: false,
+            error: errorText.trim() || 'Registration rejected by server',
+          };
+        } catch {
+          return {
+            success: false,
+            error: 'Registration rejected by server',
+          };
+        }
+      }
+    }
+
+    // Check page text for success indicators
+    const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
+
+    if (
+      pageText.includes('exitosamente') ||
+      pageText.includes('éxito') ||
+      pageText.includes('registrado') ||
+      pageText.includes('creado')
+    ) {
+      logger.info('Success indicator found in page text');
+      return { success: true };
+    }
+
+    // Check for error indicators in page text
+    if (
+      pageText.includes('error') ||
+      pageText.includes('falló') ||
+      pageText.includes('no se pudo')
+    ) {
+      logger.warn('Error indicator found in page text');
+      return {
+        success: false,
+        error: 'Registration may have failed (error indicator in page)',
+      };
+    }
+
+    // No clear success or error - assume success if we got here without throwing
+    logger.warn('No clear success or error message, assuming success');
+    return { success: true };
+  } catch (error) {
+    logger.error('Error checking registration result', { error });
+    return {
+      success: false,
+      error: 'Could not verify registration result',
+    };
+  }
+}
+
+/**
+ * Legacy compatibility export
+ * @deprecated Use registrarUsuario() instead
+ */
+export async function registrarUsuarioEnlace(userData: UserData): Promise<RegistroResult> {
+  return registrarUsuario(userData);
 }

@@ -31,6 +31,722 @@ export interface LiquidacionContext {
   enlaceUserId?: string;
 }
 
+// ============================================================================
+// PILA CALCULATION CONSTANTS (2025)
+// ============================================================================
+
+/**
+ * Salario Mínimo Mensual Legal Vigente 2025
+ */
+export const SMMLV_2025 = 1423500;
+
+/**
+ * Porcentaje de aporte a Salud (12.5%)
+ */
+export const PORCENTAJE_SALUD = 12.5;
+
+/**
+ * Porcentaje de aporte a Pensión (16%)
+ */
+export const PORCENTAJE_PENSION = 16.0;
+
+/**
+ * Porcentajes ARL por nivel de riesgo
+ */
+export const PORCENTAJES_ARL: Record<string, number> = {
+  I: 0.522,
+  II: 1.044,
+  III: 2.436,
+  IV: 4.35,
+  V: 6.96,
+};
+
+// ============================================================================
+// PILA CALCULATION HELPERS
+// ============================================================================
+
+/**
+ * Calculate PILA contributions based on IBC
+ * @param ibc - Ingreso Base de Cotización
+ * @param dias - Days worked (default: 30)
+ * @param nivelRiesgoARL - ARL risk level (I-V)
+ * @returns Calculated contributions
+ */
+export function calcularAportesPila(
+  ibc: number,
+  dias: number = 30,
+  nivelRiesgoARL: string = 'I'
+): {
+  salud: number;
+  pension: number;
+  arl: number;
+  total: number;
+} {
+  const factor = dias / 30;
+
+  const salud = Math.round((ibc * (PORCENTAJE_SALUD / 100)) * factor);
+  const pension = Math.round((ibc * (PORCENTAJE_PENSION / 100)) * factor);
+
+  const porcentajeARL = PORCENTAJES_ARL[nivelRiesgoARL] || PORCENTAJES_ARL.I;
+  const arl = Math.round((ibc * (porcentajeARL / 100)) * factor);
+
+  const total = salud + pension + arl;
+
+  return { salud, pension, arl, total };
+}
+
+/**
+ * Validate PILA data before submission
+ * @param pilaData - PILA data to validate
+ * @returns Validation result
+ */
+export function validarDatosPila(pilaData: PilaData): {
+  valid: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+
+  // Validar período
+  if (!pilaData.periodo) {
+    errors.push('Período es requerido');
+  } else if (!/^\d{4}-\d{2}$/.test(pilaData.periodo)) {
+    errors.push('Período debe tener formato YYYY-MM');
+  }
+
+  // Validar IBC
+  if (!pilaData.ibc || pilaData.ibc <= 0) {
+    errors.push('IBC debe ser mayor que 0');
+  } else if (pilaData.ibc < SMMLV_2025) {
+    errors.push(`IBC no puede ser menor que 1 SMMLV (${SMMLV_2025})`);
+  }
+
+  // Validar días cotizados
+  if (pilaData.diasCotizados && (pilaData.diasCotizados < 1 || pilaData.diasCotizados > 30)) {
+    errors.push('Días cotizados debe estar entre 1 y 30');
+  }
+
+  // Validar nivel de riesgo ARL
+  if (pilaData.nivelRiesgoARL && !PORCENTAJES_ARL[pilaData.nivelRiesgoARL]) {
+    errors.push('Nivel de riesgo ARL inválido (debe ser I, II, III, IV o V)');
+  }
+
+  // Validar montos de aportes
+  if (pilaData.salud && pilaData.salud < 0) {
+    errors.push('Salud debe ser mayor o igual que 0');
+  }
+  if (pilaData.pension && pilaData.pension < 0) {
+    errors.push('Pensión debe ser mayor o igual que 0');
+  }
+  if (pilaData.arl && pilaData.arl < 0) {
+    errors.push('ARL debe ser mayor o igual que 0');
+  }
+  if (pilaData.total && pilaData.total <= 0) {
+    errors.push('Total debe ser mayor que 0');
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
+/**
+ * Verify if a field was automatically calculated
+ * @param page - Puppeteer page
+ * @param selector - Field selector
+ * @returns True if field has a non-zero value
+ */
+async function verificarCalculoAutomatico(page: Page, selector: string): Promise<boolean> {
+  try {
+    const hasValue = await page.$eval(selector, (el) => {
+      const input = el as any;
+      const value = input.value || '';
+      return value !== '' && value !== '0' && parseFloat(value) > 0;
+    });
+
+    return hasValue;
+  } catch (error) {
+    logger.debug('Could not verify automatic calculation', { selector, error });
+    return false;
+  }
+}
+
+/**
+ * Verify if a field is readonly or disabled
+ * @param page - Puppeteer page
+ * @param selector - Field selector
+ * @returns True if field is readonly or disabled
+ */
+async function esFieldReadonly(page: Page, selector: string): Promise<boolean> {
+  try {
+    const isReadonly = await page.$eval(selector, (el) => {
+      const input = el as any;
+      return input.readOnly || input.disabled;
+    });
+
+    return isReadonly;
+  } catch (error) {
+    return false;
+  }
+}
+
+// ============================================================================
+// FORM FILLING FUNCTIONS
+// ============================================================================
+
+/**
+ * Fill PILA liquidation form
+ * Handles both automatic and manual calculation forms
+ *
+ * @param context - Liquidation context
+ * @param pilaData - PILA data to fill
+ */
+export async function llenarFormularioPila(
+  context: LiquidacionContext,
+  pilaData: PilaData
+): Promise<void> {
+  const { page } = context;
+
+  logger.info('Starting to fill PILA liquidation form', {
+    numeroDocumento: context.numeroDocumento,
+    periodo: pilaData.periodo,
+    ibc: pilaData.ibc,
+    total: pilaData.total,
+  });
+
+  // Validate PILA data
+  const validation = validarDatosPila(pilaData);
+  if (!validation.valid) {
+    const errorMsg = `Invalid PILA data: ${validation.errors.join(', ')}`;
+    logger.error(errorMsg, { errors: validation.errors });
+    throw new BotError(errorMsg);
+  }
+
+  try {
+    await browserManager.takeScreenshot(page, 'liquidacion-form-before-fill');
+
+    // 1. Fill PERÍODO (mes y año)
+    await fillPeriodo(page, pilaData.periodo);
+
+    // 2. Fill DÍAS COTIZADOS
+    await fillDiasCotizados(page, pilaData.diasCotizados || 30);
+
+    // 3. Fill INGRESO BASE and IBC
+    await fillIngresoBaseIBC(page, pilaData);
+
+    // 4. Fill SALUD
+    await fillSalud(page, pilaData.salud);
+
+    // 5. Fill PENSIÓN
+    await fillPension(page, pilaData.pension);
+
+    // 6. Fill ARL
+    await fillARL(page, pilaData);
+
+    // 7. Verify TOTAL
+    await verifyTotal(page, pilaData.total);
+
+    // 8. Screenshot after filling
+    await browserManager.takeScreenshot(page, 'liquidacion-form-filled');
+
+    logger.info('✅ PILA form filled successfully', {
+      numeroDocumento: context.numeroDocumento,
+      periodo: pilaData.periodo,
+    });
+  } catch (error) {
+    logger.error('❌ Error filling PILA form', {
+      error,
+      numeroDocumento: context.numeroDocumento,
+      periodo: pilaData.periodo,
+    });
+    await browserManager.takeScreenshot(page, 'liquidacion-fill-error');
+    throw new BotError('Failed to fill PILA form');
+  }
+}
+
+/**
+ * Fill período field (mes and año)
+ */
+async function fillPeriodo(page: Page, periodo: string): Promise<void> {
+  try {
+    const [anio, mes] = periodo.split('-'); // "2026-02" -> ["2026", "02"]
+
+    logger.info('Setting período', { mes, anio });
+
+    // Check if there's a single período input
+    const periodoInputExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.PERIODO);
+
+    if (periodoInputExists) {
+      logger.debug('Using single período input');
+      await waitAndType(page, SELECTORS.LIQUIDACION.FORM.PERIODO, periodo, {
+        clear: true,
+        delay: 100,
+      });
+      await sleep(500);
+      return;
+    }
+
+    // Check for separate MES and ANIO fields
+    const mesExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.MES);
+    const anioExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.ANIO);
+
+    if (mesExists) {
+      logger.debug('Selecting mes');
+
+      // Check if it's a select or input
+      const isSelect = await page.$eval(
+        SELECTORS.LIQUIDACION.FORM.MES,
+        (el) => el.tagName === 'SELECT'
+      );
+
+      if (isSelect) {
+        // Try to select by value
+        await page.select(SELECTORS.LIQUIDACION.FORM.MES, mes).catch(async () => {
+          // If that fails, try to select by visible text
+          await page.evaluate(
+            (selector, mesValue) => {
+              const select = document.querySelector(selector) as any;
+              if (select) {
+                const options = Array.from(select.options) as any[];
+                const option = options.find((opt: any) => opt.text.includes(mesValue));
+                if (option) {
+                  select.value = option.value;
+                  select.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+              }
+            },
+            SELECTORS.LIQUIDACION.FORM.MES,
+            mes
+          );
+        });
+      } else {
+        // It's an input
+        await waitAndType(page, SELECTORS.LIQUIDACION.FORM.MES, mes, {
+          clear: true,
+          delay: 80,
+        });
+      }
+
+      await sleep(500);
+    }
+
+    if (anioExists) {
+      logger.debug('Setting año');
+
+      const isSelect = await page.$eval(
+        SELECTORS.LIQUIDACION.FORM.ANIO,
+        (el) => el.tagName === 'SELECT'
+      );
+
+      if (isSelect) {
+        await page.select(SELECTORS.LIQUIDACION.FORM.ANIO, anio).catch(async () => {
+          await page.evaluate(
+            (selector, anioValue) => {
+              const select = document.querySelector(selector) as any;
+              if (select) {
+                const options = Array.from(select.options) as any[];
+                const option = options.find((opt: any) => opt.text.includes(anioValue));
+                if (option) {
+                  select.value = option.value;
+                  select.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+              }
+            },
+            SELECTORS.LIQUIDACION.FORM.ANIO,
+            anio
+          );
+        });
+      } else {
+        await waitAndType(page, SELECTORS.LIQUIDACION.FORM.ANIO, anio, {
+          clear: true,
+          delay: 80,
+        });
+      }
+
+      await sleep(500);
+    }
+
+    logger.debug('✅ Período set successfully');
+  } catch (error) {
+    logger.error('Error setting período', { error, periodo });
+    throw error;
+  }
+}
+
+/**
+ * Fill días cotizados field
+ */
+async function fillDiasCotizados(page: Page, dias: number): Promise<void> {
+  try {
+    logger.info('Setting días cotizados', { dias });
+
+    const diasExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.DIAS_COTIZADOS);
+
+    if (!diasExists) {
+      logger.debug('Días cotizados field not found, skipping');
+      return;
+    }
+
+    // Check if readonly
+    const isReadonly = await esFieldReadonly(page, SELECTORS.LIQUIDACION.FORM.DIAS_COTIZADOS);
+    if (isReadonly) {
+      logger.debug('Días cotizados field is readonly, skipping');
+      return;
+    }
+
+    await waitAndType(page, SELECTORS.LIQUIDACION.FORM.DIAS_COTIZADOS, String(dias), {
+      clear: true,
+      delay: 80,
+    });
+
+    await sleep(500);
+    logger.debug('✅ Días cotizados set successfully');
+  } catch (error) {
+    logger.error('Error setting días cotizados', { error, dias });
+    throw error;
+  }
+}
+
+/**
+ * Fill ingreso base and IBC fields
+ */
+async function fillIngresoBaseIBC(page: Page, pilaData: PilaData): Promise<void> {
+  try {
+    logger.info('Setting ingreso base and IBC', {
+      ingresoBase: pilaData.ingresoBase,
+      ibc: pilaData.ibc,
+    });
+
+    // Check for INGRESO_BASE field
+    const ingresoBaseExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.INGRESO_BASE);
+
+    if (ingresoBaseExists) {
+      logger.debug('Setting ingreso base');
+
+      await waitAndType(
+        page,
+        SELECTORS.LIQUIDACION.FORM.INGRESO_BASE,
+        String(pilaData.ingresoBase || pilaData.ibc),
+        { clear: true, delay: 100 }
+      );
+
+      await sleep(1000);
+
+      // Check if IBC was calculated automatically
+      const ibcExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.IBC_INPUT);
+
+      if (ibcExists) {
+        const ibcCalculated = await verificarCalculoAutomatico(
+          page,
+          SELECTORS.LIQUIDACION.FORM.IBC_INPUT
+        );
+
+        if (!ibcCalculated) {
+          logger.debug('IBC not calculated automatically, setting manually');
+          await waitAndType(page, SELECTORS.LIQUIDACION.FORM.IBC_INPUT, String(pilaData.ibc), {
+            clear: true,
+            delay: 100,
+          });
+          await sleep(500);
+        } else {
+          logger.debug('IBC calculated automatically');
+        }
+      }
+    } else {
+      // No ingreso base field, just set IBC
+      logger.debug('Setting IBC directly');
+
+      const ibcExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.IBC_INPUT);
+
+      if (ibcExists) {
+        await waitAndType(page, SELECTORS.LIQUIDACION.FORM.IBC_INPUT, String(pilaData.ibc), {
+          clear: true,
+          delay: 100,
+        });
+        await sleep(1000);
+      } else {
+        // Try alternative IBC selector
+        const ibcAltExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.IBC);
+        if (ibcAltExists) {
+          await waitAndType(page, SELECTORS.LIQUIDACION.FORM.IBC, String(pilaData.ibc), {
+            clear: true,
+            delay: 100,
+          });
+          await sleep(1000);
+        }
+      }
+    }
+
+    logger.debug('✅ Ingreso base / IBC set successfully');
+  } catch (error) {
+    logger.error('Error setting ingreso base / IBC', { error, pilaData });
+    throw error;
+  }
+}
+
+/**
+ * Fill salud field
+ */
+async function fillSalud(page: Page, salud: number): Promise<void> {
+  try {
+    logger.info('Setting salud', { salud });
+
+    const saludExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.SALUD_INPUT);
+
+    if (!saludExists) {
+      logger.debug('Salud field not found, trying alternative');
+
+      const saludAltExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.SALUD);
+      if (!saludAltExists) {
+        logger.warn('Salud field not found');
+        return;
+      }
+    }
+
+    const selector = (await elementExists(page, SELECTORS.LIQUIDACION.FORM.SALUD_INPUT))
+      ? SELECTORS.LIQUIDACION.FORM.SALUD_INPUT
+      : SELECTORS.LIQUIDACION.FORM.SALUD;
+
+    // Check if readonly or auto-calculated
+    const isReadonly = await esFieldReadonly(page, selector);
+    if (isReadonly) {
+      logger.debug('Salud field is readonly (auto-calculated)');
+      return;
+    }
+
+    const saludCalculated = await verificarCalculoAutomatico(page, selector);
+
+    if (saludCalculated) {
+      logger.debug('Salud already calculated automatically');
+      return;
+    }
+
+    logger.debug('Setting salud manually');
+    await waitAndType(page, selector, String(salud), {
+      clear: true,
+      delay: 80,
+    });
+
+    await sleep(500);
+    logger.debug('✅ Salud set successfully');
+  } catch (error) {
+    logger.error('Error setting salud', { error, salud });
+    throw error;
+  }
+}
+
+/**
+ * Fill pensión field
+ */
+async function fillPension(page: Page, pension: number): Promise<void> {
+  try {
+    logger.info('Setting pensión', { pension });
+
+    const pensionExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.PENSION_INPUT);
+
+    if (!pensionExists) {
+      logger.debug('Pensión field not found, trying alternative');
+
+      const pensionAltExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.PENSION);
+      if (!pensionAltExists) {
+        logger.warn('Pensión field not found');
+        return;
+      }
+    }
+
+    const selector = (await elementExists(page, SELECTORS.LIQUIDACION.FORM.PENSION_INPUT))
+      ? SELECTORS.LIQUIDACION.FORM.PENSION_INPUT
+      : SELECTORS.LIQUIDACION.FORM.PENSION;
+
+    // Check if readonly or auto-calculated
+    const isReadonly = await esFieldReadonly(page, selector);
+    if (isReadonly) {
+      logger.debug('Pensión field is readonly (auto-calculated)');
+      return;
+    }
+
+    const pensionCalculated = await verificarCalculoAutomatico(page, selector);
+
+    if (pensionCalculated) {
+      logger.debug('Pensión already calculated automatically');
+      return;
+    }
+
+    logger.debug('Setting pensión manually');
+    await waitAndType(page, selector, String(pension), {
+      clear: true,
+      delay: 80,
+    });
+
+    await sleep(500);
+    logger.debug('✅ Pensión set successfully');
+  } catch (error) {
+    logger.error('Error setting pensión', { error, pension });
+    throw error;
+  }
+}
+
+/**
+ * Fill ARL field and nivel de riesgo
+ */
+async function fillARL(page: Page, pilaData: PilaData): Promise<void> {
+  try {
+    logger.info('Setting ARL', {
+      arl: pilaData.arl,
+      nivelRiesgo: pilaData.nivelRiesgoARL,
+    });
+
+    // First, set nivel de riesgo if selector exists
+    const nivelRiesgoExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.ARL_NIVEL_RIESGO);
+
+    if (nivelRiesgoExists && pilaData.nivelRiesgoARL) {
+      logger.debug('Setting nivel de riesgo ARL', { nivel: pilaData.nivelRiesgoARL });
+
+      await page.select(SELECTORS.LIQUIDACION.FORM.ARL_NIVEL_RIESGO, pilaData.nivelRiesgoARL).catch(
+        async () => {
+          // Try alternative: select by text
+          await page.evaluate(
+            (selector, nivel) => {
+              const select = document.querySelector(selector) as any;
+              if (select) {
+                const options = Array.from(select.options) as any[];
+                const option = options.find(
+                  (opt: any) => opt.text.includes(nivel) || opt.value === nivel
+                );
+                if (option) {
+                  select.value = option.value;
+                  select.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+              }
+            },
+            SELECTORS.LIQUIDACION.FORM.ARL_NIVEL_RIESGO,
+            pilaData.nivelRiesgoARL
+          );
+        }
+      );
+
+      await sleep(1000);
+    }
+
+    // Now set ARL value
+    const arlExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.ARL_INPUT);
+
+    if (!arlExists) {
+      logger.debug('ARL field not found, trying alternative');
+
+      const arlAltExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.ARL);
+      if (!arlAltExists) {
+        logger.warn('ARL field not found');
+        return;
+      }
+    }
+
+    const selector = (await elementExists(page, SELECTORS.LIQUIDACION.FORM.ARL_INPUT))
+      ? SELECTORS.LIQUIDACION.FORM.ARL_INPUT
+      : SELECTORS.LIQUIDACION.FORM.ARL;
+
+    // Check if readonly or auto-calculated
+    const isReadonly = await esFieldReadonly(page, selector);
+    if (isReadonly) {
+      logger.debug('ARL field is readonly (auto-calculated)');
+      return;
+    }
+
+    const arlCalculated = await verificarCalculoAutomatico(page, selector);
+
+    if (arlCalculated) {
+      logger.debug('ARL already calculated automatically');
+      return;
+    }
+
+    logger.debug('Setting ARL manually');
+    await waitAndType(page, selector, String(pilaData.arl), {
+      clear: true,
+      delay: 80,
+    });
+
+    await sleep(500);
+    logger.debug('✅ ARL set successfully');
+  } catch (error) {
+    logger.error('Error setting ARL', { error, pilaData });
+    throw error;
+  }
+}
+
+/**
+ * Verify total calculation
+ */
+async function verifyTotal(page: Page, expectedTotal: number): Promise<void> {
+  try {
+    logger.info('Verifying total calculation', { expectedTotal });
+
+    // Try multiple selectors for total
+    const totalSelectors = [
+      SELECTORS.LIQUIDACION.FORM.TOTAL_DISPLAY,
+      SELECTORS.LIQUIDACION.FORM.TOTAL,
+      SELECTORS.LIQUIDACION.RESULTADO.VALOR_TOTAL,
+    ];
+
+    let totalText = '';
+    let selectorUsed = '';
+
+    for (const selector of totalSelectors) {
+      const exists = await elementExists(page, selector);
+      if (exists) {
+        totalText = await page
+          .$eval(selector, (el) => (el as any).textContent || (el as any).value || '')
+          .catch(() => '');
+
+        if (totalText) {
+          selectorUsed = selector;
+          break;
+        }
+      }
+    }
+
+    if (!totalText) {
+      logger.warn('Could not find total display');
+      return;
+    }
+
+    // Extract number from text (remove currency symbols, commas, etc.)
+    const totalCalculated = parseInt(totalText.replace(/\D/g, ''), 10);
+
+    if (isNaN(totalCalculated)) {
+      logger.warn('Could not parse total value', { totalText });
+      return;
+    }
+
+    logger.info('Total calculated by Enlace', {
+      expected: expectedTotal,
+      calculated: totalCalculated,
+      selector: selectorUsed,
+    });
+
+    // Verify with tolerance (±100 for rounding differences)
+    const difference = Math.abs(totalCalculated - expectedTotal);
+
+    if (difference > 100) {
+      logger.warn('⚠️  Total mismatch detected', {
+        expected: expectedTotal,
+        calculated: totalCalculated,
+        difference,
+        percentage: ((difference / expectedTotal) * 100).toFixed(2) + '%',
+      });
+      // Don't throw - this might be acceptable
+    } else {
+      logger.info('✅ Total verified successfully', {
+        expected: expectedTotal,
+        calculated: totalCalculated,
+        difference,
+      });
+    }
+  } catch (error) {
+    logger.warn('Error verifying total', { error, expectedTotal });
+    // Don't throw - verification is optional
+  }
+}
+
 /**
  * Navigate to PILA Liquidation section and select user
  * This function handles different layouts and user selection methods in Enlace
@@ -481,62 +1197,19 @@ export class EnlaceLiquidacionBot {
 
   /**
    * Fill liquidation form with PILA data
+   * Updated to use new llenarFormularioPila function
    */
   private async fillLiquidationForm(page: Page, pilaData: PilaData): Promise<void> {
     try {
-      await browserManager.takeScreenshot(page, 'liquidation-form-before-fill');
+      // Use new modular fill function
+      const context: LiquidacionContext = {
+        page,
+        numeroDocumento: '', // Not needed for form filling
+      };
 
-      // 1. Periodo (could be split into Mes/Año or single input)
-      await this.fillPeriodo(page, pilaData.periodo);
+      await llenarFormularioPila(context, pilaData);
 
-      // 2. IBC (Ingreso Base de Cotización)
-      logger.debug('Entering IBC', { ibc: pilaData.ibc });
-      const ibcExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.IBC);
-      const ingresoBaseExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.INGRESO_BASE);
-
-      if (ibcExists) {
-        await waitAndType(page, SELECTORS.LIQUIDACION.FORM.IBC, pilaData.ibc.toString(), {
-          clear: true,
-          delay: 100,
-        });
-      } else if (ingresoBaseExists) {
-        await waitAndType(
-          page,
-          SELECTORS.LIQUIDACION.FORM.INGRESO_BASE,
-          pilaData.ibc.toString(),
-          { clear: true, delay: 100 }
-        );
-      }
-      await randomDelay(300, 500);
-
-      // 3. Días cotizados
-      logger.debug('Entering días cotizados', { dias: pilaData.diasCotizados });
-      const diasExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.DIAS_COTIZADOS);
-      if (diasExists) {
-        await waitAndType(
-          page,
-          SELECTORS.LIQUIDACION.FORM.DIAS_COTIZADOS,
-          pilaData.diasCotizados.toString(),
-          { clear: true, delay: 80 }
-        );
-        await randomDelay(300, 500);
-      }
-
-      // 4. Nivel de riesgo ARL
-      logger.debug('Selecting nivel de riesgo ARL', { nivel: pilaData.nivelRiesgoARL });
-      const nivelRiesgoExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.NIVEL_RIESGO_ARL);
-      if (nivelRiesgoExists) {
-        await selectOption(page, SELECTORS.LIQUIDACION.FORM.NIVEL_RIESGO_ARL, pilaData.nivelRiesgoARL);
-        await randomDelay(500, 800);
-      }
-
-      // 5. Valores de aportes (Salud, Pensión, ARL)
-      // Note: These might be calculated automatically after entering IBC
-      // But we'll try to fill them if inputs exist
-      await this.fillAporteValues(page, pilaData);
-
-      await browserManager.takeScreenshot(page, 'liquidation-form-after-fill');
-      logger.info('✅ Liquidation form filled successfully');
+      logger.info('✅ Liquidation form filled successfully (via new function)');
     } catch (error) {
       logger.error('Error filling liquidation form', { error });
       await browserManager.takeScreenshot(page, 'liquidation-form-fill-error');

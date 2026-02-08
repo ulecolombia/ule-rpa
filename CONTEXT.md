@@ -387,5 +387,35 @@ async function handleRegistroTask(job: Job) {
 
 ---
 
+## Documentation Update Protocol 🔄
+
+**CRITICAL**: Documentation MUST be kept updated to maintain perfect context.
+
+### Update Frequency:
+- **Option 1**: After completing each phase (RECOMMENDED)
+- **Option 2**: Every 24 hours if work was done
+
+### Quick Commands:
+```bash
+# Daily update (generates entry in DAILY_UPDATES.md)
+npm run update:daily
+
+# Phase completion (shows checklist)
+npm run update:phase
+```
+
+### Files to Update:
+When completing a phase, update:
+1. ✅ **PROGRESS.md** - Add phase completion details
+2. ✅ **CONTEXT.md** - Update "Current Project State", Statistics, Git Commits
+3. ✅ **DAILY_UPDATES.md** - Add daily entry (automated via `npm run update:daily`)
+4. ✅ Other files as needed (BOT_FLOWS, SELECTORS_MAP, ARCHITECTURE, etc.)
+
+**Full Protocol**: See `UPDATE_PROTOCOL.md` for complete checklist and templates.
+
+**Rule**: Never let documentation be outdated > 24 hours.
+
+---
+
 **Last Updated**: 2026-02-08
 **Maintained By**: AI Sessions + Luis (User)

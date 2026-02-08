@@ -23,7 +23,9 @@
     "lint:fix": "eslint src --ext .ts --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "update:daily": "node scripts/update-docs.js daily",
+    "update:phase": "node scripts/update-docs.js phase-complete"
   },
   "keywords": [
     "rpa",

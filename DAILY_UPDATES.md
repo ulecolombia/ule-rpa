@@ -75,6 +75,20 @@ Log de actualizaciones diarias del proyecto ULE RPA Service.
     - Script de validación paso a paso
     - Métricas de éxito y próximos pasos
     - FASE 2 DOCUMENTATION 100% COMPLETA
+16. ✅ **Subfase 3.1 COMPLETADA** - Bot de Navegación a Liquidación con PSE
+    - Selectores LIQUIDACION actualizados en selectors.ts
+    - Navegación: MENU_LIQUIDAR, MENU_GENERADOR
+    - Opciones: PLANILLA_EN_LINEA, CARGA_ARCHIVO, DUPLICAR_PLANILLA
+    - Formulario completo: MES, ANIO, IBC, SALUD, PENSION, ARL
+    - Selectores PSE: BOTON_PAGAR_PSE, IFRAME_PSE, RADIO_PSE
+    - URL actualizada: https://suaporte.com.co/generador-planillas/#/
+    - Bot de liquidación mejorado (liquidacion.bot.ts)
+    - Nuevo método navigateToPSEPage() - navega a PSE y SE DETIENE
+    - Parámetro navigateToPSE agregado a liquidarPila()
+    - extractNumeroPlanilla() mejorado con 5+ estrategias de extracción
+    - extractFechaLimite() mejorado con múltiples formatos de fecha
+    - ⏸️ Bot SE DETIENE en PSE (pago es Fase 8)
+    - SUBFASE 3.1 100% COMPLETA
 
 ### Archivos Creados:
 - `CONTEXT.md` (390 líneas) - Master context
@@ -97,27 +111,36 @@ Log de actualizaciones diarias del proyecto ULE RPA Service.
 - `789fb17` - feat: Complete worker integration for all bots (Subfases 2.5-2.7)
 - `ff7521b` - feat: Complete ULE integration system (Subfase 2.8)
 - `73598ea` - feat: Complete testing system for Phase 2 (Subfase 2.9)
-- (pending) - docs: Complete Phase 2 documentation (FASE-2-REGISTRO.md)
+- `d4c7f6d` - docs: Complete Phase 2 documentation (FASE-2-REGISTRO.md)
+- `985f11c` - feat: Phase 3.1 - Enhanced liquidation bot with PSE navigation
+- (pending) - docs: Update documentation for Subfase 3.1 completion
 
 ### Próximos Pasos (Siguientes 24h):
-- [ ] Crear script de actualización automática (`scripts/update-docs.js`)
-- [ ] Actualizar package.json con comandos de actualización
-- [ ] Actualizar CONTEXT.md con referencia al protocolo de actualización
-- [ ] Commit final del sistema de actualización
+- [x] ~~Subfase 3.1: Bot de Navegación a Liquidación con PSE~~ ✅ COMPLETADA
+- [ ] Subfase 3.2: Actualizar selectores desde sitio real de Enlace Operativo
+- [ ] Subfase 3.3: Testing E2E del flujo completo de liquidación
+- [ ] Subfase 3.4: Ajustar delays y comportamiento según sitio real
+- [ ] Documentación de Fase 3
 
 ### Estado del Proyecto:
 **FASE 2 Completada (100%)**:
 - ✅ 5 bots implementados (Auth, Search, Registro, Liquidación, Comprobante)
 - ✅ 4 worker handlers implementados (REGISTRO, LIQUIDACION, COMPROBANTE, FULL_FLOW)
-- ✅ 11,800+ líneas de código
-- ✅ Documentación completa (8000+ líneas)
-- ✅ Sistema de actualización implementado
-- ✅ Arquitectura refactorizada (bots con browser propio)
+- ✅ 13,800+ líneas de código
+- ✅ Documentación completa (12,200+ líneas)
+- ✅ Sistema de testing completo
+- ✅ Integración ULE completa
 
-**Próxima Fase**:
-- FASE 3: Actualizar selectores desde sitio real (requiere acceso a Enlace Operativo)
-- FASE 4: Testing E2E con credenciales reales
+**FASE 3 En Progreso (15%)**:
+- ✅ Subfase 3.1: Bot de Navegación a Liquidación con PSE (100%)
+- ⏳ Subfase 3.2: Actualizar selectores desde sitio real (0%)
+- ⏳ Subfase 3.3: Testing E2E con credenciales reales (0%)
+- ⏳ Subfase 3.4: Ajustar delays según sitio real (0%)
+
+**Próximas Fases**:
+- FASE 4: Testing E2E completo end-to-end
 - FASE 5: Deployment y monitoring
+- FASE 8: Payment flow (desde ULE)
 
 ### Bloqueadores:
 - ⚠️ **CRÍTICO**: Selectores son ESTIMATED, deben actualizarse desde sitio real antes de producción

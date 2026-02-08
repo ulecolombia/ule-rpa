@@ -1,5 +1,68 @@
 # ULE RPA Service - Progress Report
 
+## 🔄 FASE 3: Bot de Liquidación de PILA - EN PROGRESO
+
+### Commits Realizados:
+1. **Commit 985f11c**: Phase 3.1 - Enhanced liquidation bot with PSE navigation
+
+### Subfases Completadas:
+
+#### Subfase 3.1: Bot de Navegación a Liquidación con PSE ✅
+**Fecha**: 2026-02-08
+**Commit**: 985f11c
+
+**Cambios en selectors.ts**:
+- ✅ Selectores LIQUIDACION actualizados y expandidos
+- ✅ Navegación: MENU_LIQUIDAR, MENU_GENERADOR
+- ✅ Opciones de liquidación: PLANILLA_EN_LINEA, CARGA_ARCHIVO, DUPLICAR_PLANILLA
+- ✅ Formulario completo con todos los campos:
+  - Período: MES, ANIO (con fallbacks)
+  - IBC: IBC_INPUT, INGRESO_BASE
+  - Aportes: SALUD_INPUT, PENSION_INPUT, ARL_INPUT
+  - Porcentajes: SALUD_PORCENTAJE, PENSION_PORCENTAJE, ARL_PORCENTAJE
+  - Acciones: CALCULAR, VALIDAR, CONFIRMAR, GENERAR
+- ✅ Selectores RESULTADO mejorados:
+  - NUMERO_PLANILLA con múltiples estrategias
+  - Soporte para regex pattern matching
+  - FECHA_LIMITE con múltiples formatos
+  - VALOR_TOTAL, MENSAJE_EXITO
+- ✅ **NUEVO: Selectores PSE**
+  - BOTON_PAGAR, BOTON_PAGAR_PSE
+  - SELECCIONAR_PSE, RADIO_PSE
+  - IFRAME_PSE, IFRAME_PAGOS
+  - CONTINUAR_PAGO
+- ✅ URL actualizada: https://suaporte.com.co/generador-planillas/#/
+
+**Mejoras en liquidacion.bot.ts**:
+- ✅ Parámetro `navigateToPSE` agregado a `liquidarPila()`
+- ✅ **NUEVO método**: `navigateToPSEPage()`
+  - Navega a página de PSE
+  - Hace clic en "Pagar con PSE"
+  - Selecciona método de pago PSE
+  - Espera iframe de PSE
+  - Toma screenshots en cada paso
+  - ⏸️ **SE DETIENE antes del pago** (Fase 8)
+- ✅ `extractNumeroPlanilla()` mejorado:
+  - 5+ estrategias de extracción
+  - Soporte para selectores RESULTADO nuevos
+  - Fallback a selectores legacy RESULT
+  - Regex pattern matching
+  - Búsqueda en texto de página
+- ✅ `extractFechaLimite()` mejorado:
+  - Múltiples selectores
+  - Soporte para formatos ISO y DD/MM/YYYY
+  - Mejor manejo de errores
+- ✅ `liquidarPilaEnlace()` actualizado con parámetro PSE
+
+**Resultado**:
+- ✅ Bot completo de liquidación PILA
+- ✅ Navegación a PSE implementada
+- ✅ Extracción robusta de datos
+- ✅ Ready para testing E2E
+- ✅ Cumple requisitos de Fase 3.1
+
+---
+
 ## ✅ FASE 2: Bot System & Worker Integration - COMPLETADA
 
 ### Commits Realizados:
@@ -10,7 +73,7 @@
 5. **Commit 789fb17**: Complete worker integration for all bots (Subfases 2.5-2.7)
 6. **Commit ff7521b**: Complete ULE integration system (Subfase 2.8)
 7. **Commit 73598ea**: Complete testing system for Phase 2 (Subfase 2.9)
-8. **Commit (pending)**: Complete Phase 2 documentation (FASE-2-REGISTRO.md)
+8. **Commit d4c7f6d**: Complete Phase 2 documentation (FASE-2-REGISTRO.md)
 
 ---
 

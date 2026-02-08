@@ -2,6 +2,160 @@
 
 ## 2026-02-08
 
+### ✅ Fase 4: Bot de Descarga de Comprobantes - EN PROGRESO
+
+#### Subfase 4.1: Bot de Detección de Pagos
+**Commits**: `ffb7b15`, `e0133ad`
+
+**PARTE 1: Selectores de Comprobantes** (Commit `ffb7b15`)
+
+**Implementado**:
+- ✅ Sección completa `COMPROBANTES` con 50+ selectores
+- ✅ Navegación: `MENU_COMPROBANTES`
+- ✅ Búsqueda: `BUSCAR_INPUT`, `FILTRO_PERIODO`, `FILTRO_ESTADO`
+- ✅ Tabla de resultados con data attributes
+- ✅ Botones de descarga: `BOTON_DESCARGAR`, `BOTON_VER_PDF`, `LINK_PDF`
+- ✅ Estados: `ESTADO_PAGADA`, `ESTADO_PENDIENTE`, `ESTADO_RECHAZADA`, `ESTADO_VENCIDA`
+- ✅ Selectores con múltiples fallbacks (data attributes, nth-child, text-based)
+
+**URLs**:
+```typescript
+COMPROBANTES: 'https://suaporte.com.co/comprobantes/#/'
+COMPROBANTES_ALT: 'https://suaporte.com.co/comprobantes/'
+```
+
+**Archivos**:
+- `src/bots/utils/selectors.ts` (actualizado)
+
+**PARTE 2: Función de Verificación de Estado** (Commit `e0133ad`)
+
+**Implementado**:
+- ✅ `verificarEstadoPlanilla()` - Función principal (539 líneas)
+- ✅ Navegación a comprobantes (3 estrategias)
+- ✅ Búsqueda por número de planilla
+- ✅ Detección de estados: PAGADA, PENDIENTE, RECHAZADA, VENCIDA
+- ✅ Extracción de datos: fecha pago, valor, PDF URL
+- ✅ 3 estrategias de extracción de tabla
+- ✅ Parsing robusto de fechas (3 formatos)
+- ✅ Parsing de valores (cualquier formato)
+
+**Estrategias de Extracción**:
+1. **Data Attributes** (más estable):
+   - `[data-field="numeroPlanilla"]`
+   - `[data-field="estado"]`
+   - `[data-field="fechaPago"]`
+   - `[data-field="valor"]`
+
+2. **Posición de Columnas** (fallback):
+   - Asume: Número | Fecha | Valor | Estado | Acciones
+   - Extrae por `nth-child`
+
+3. **Búsqueda de Texto** (último recurso):
+   - Keywords: "pagada", "pendiente", "rechazada"
+   - Patrones de fecha: `DD/MM/YYYY`
+   - Patrones de valor: `$` o números grandes
+
+**Return Type**:
+```typescript
+interface PlanillaStatus {
+  numeroPlanilla: string
+  estado: 'PAGADA' | 'PENDIENTE' | 'RECHAZADA' | 'VENCIDA'
+  fechaPago?: Date
+  valor?: number
+  comprobantePdfUrl?: string
+}
+```
+
+**Funciones Helper** (10+):
+- `navegarAComprobantes()` - Navegación con fallbacks
+- `buscarPlanillaStatus()` - Búsqueda multi-input
+- `verificarResultados()` - Validación de resultados
+- `extraerDatosPlanilla()` - Orquestador de extracción
+- `extraerPorDataAttributes()` - Estrategia 1
+- `extraerPorPosicion()` - Estrategia 2
+- `extraerPorTexto()` - Estrategia 3
+- `parsePlanillaData()` - Orquestador de parsing
+- `parseEstado()` - Estado text → enum
+- `parseFechaPago()` - 3 formatos de fecha
+- `parseValor()` - Extracción numérica
+
+**Archivos**:
+- `src/bots/enlace/comprobante.bot.ts` (+539 líneas)
+
+---
+
+#### Subfase 4.2: Bot de Descarga de PDF
+**Commits**: `309fa20`
+
+**Implementado**:
+- ✅ `descargarComprobante()` - Función principal de descarga (319 líneas)
+- ✅ `waitForDownload()` - Helper de monitoreo de descargas
+- ✅ Interface `DownloadResult` con metadatos completos
+- ✅ Verificación de planilla pagada antes de descargar
+- ✅ Configuración CDP para control de descargas
+- ✅ Múltiples estrategias de botón de descarga (3 fallbacks)
+- ✅ Monitoreo de directorio de descargas (polling)
+- ✅ Filtrado de archivos temporales (.crdownload, .tmp, .download)
+- ✅ Validación de tamaño de archivo (> 1KB)
+- ✅ Validación de formato PDF (%PDF header)
+- ✅ Renombrado a nombre descriptivo: `comprobante_{numero}_{timestamp}.pdf`
+
+**Características**:
+```typescript
+export async function descargarComprobante(
+  numeroPlanilla: string,
+  outputDir: string = './downloads/comprobantes'
+): Promise<DownloadResult>
+```
+
+**Flujo (7 pasos)**:
+1. Verificar estado de planilla (debe ser PAGADA)
+2. Navegar a comprobantes si es necesario
+3. Crear directorio de descarga
+4. Configurar CDP download behavior
+5. Encontrar y hacer click en botón de descarga
+6. Esperar a que se complete la descarga
+7. Verificar archivo y renombrar
+
+**Estrategias de Descarga** (3 fallbacks):
+1. Botón con texto "Descargar" o "PDF"
+2. Link directo a PDF (`a[href*=".pdf"]`)
+3. Cualquier botón en la fila (último recurso)
+
+**Helper: waitForDownload()**:
+- ✅ Monitorea directorio cada 500ms
+- ✅ Filtra archivos temporales
+- ✅ Retorna PDF más reciente
+- ✅ Verifica archivo creado en últimos 10 segundos
+- ✅ Espera a que tenga contenido (> 0 bytes)
+- ✅ Timeout configurable (default: 30s)
+
+**Return Type**:
+```typescript
+interface DownloadResult {
+  success: boolean
+  localPath?: string       // Path completo al archivo
+  fileName?: string        // Nombre descriptivo
+  fileSize?: number        // Tamaño en bytes
+  error?: string           // Mensaje de error
+}
+```
+
+**Ejemplo de Uso**:
+```typescript
+const result = await descargarComprobante('123456789');
+if (result.success) {
+  console.log('PDF:', result.localPath);
+  console.log('Size:', result.fileSize);
+  // Upload to S3, send to user, etc.
+}
+```
+
+**Archivos**:
+- `src/bots/enlace/comprobante.bot.ts` (+319 líneas)
+
+---
+
 ### ✅ Fase 3: Liquidación de PILA - COMPLETADA
 
 #### Subfase 3.1: Bot Core de Liquidación

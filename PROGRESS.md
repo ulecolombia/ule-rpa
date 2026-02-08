@@ -5,6 +5,7 @@
 ### Commits Realizados:
 1. **Commit e8e5012**: Complete RPA bot system implementation
 2. **Commit 91aa0ce**: Comprehensive registration bot with validation
+3. **Commit 150f71e**: Complete REGISTRO worker handler (Subfase 2.4)
 
 ---
 
@@ -164,6 +165,118 @@ Selectores organizados por sección:
 - COMMON (alerts, modals, loading)
 - NAV (navigation items)
 - URL_PATTERNS
+
+---
+
+### 7. Worker de Registro Completo ✅ (Subfase 2.4)
+**Archivo**: `src/orchestrator/worker.ts` (actualizado)
+
+**Funcionalidad**:
+- Worker BullMQ que procesa tareas de registro
+- Integración completa entre queue y bot de registro
+
+**Caso REGISTRO Implementado**:
+```typescript
+case 'REGISTRO': {
+  // 1. Validación de entrada
+  if (!userData) throw new Error('userData is required');
+
+  // 2. Log de inicio
+  await logTaskProgress(task.id, 'INFO', 'Starting user registration');
+
+  // 3. Ejecutar bot de registro
+  const registroResult = await registrarUsuario(userData);
+
+  // 4. Guardar en database
+  const enlaceUser = await prisma.enlaceUser.upsert({
+    where: { uleUserId },
+    create: {
+      uleUserId,
+      tipoDocumento: userData.tipoDocumento,
+      numeroDocumento: userData.numeroDocumento,
+      nombre: userData.nombre,
+      eps: userData.eps,
+      pension: userData.pension,
+      arl: userData.arl,
+      enlaceUserId: registroResult.enlaceUserId,
+      enlaceStatus: 'REGISTERED',
+      registeredAt: new Date(),
+      lastSyncAt: new Date(),
+    },
+    update: {
+      enlaceUserId: registroResult.enlaceUserId,
+      enlaceStatus: 'REGISTERED',
+      lastSyncAt: new Date(),
+    },
+  });
+
+  // 5. Log de éxito
+  await logTaskProgress(task.id, 'INFO',
+    registroResult.alreadyExists
+      ? 'User already existed in Enlace'
+      : 'User registered successfully');
+
+  // 6. Retornar resultado
+  return {
+    success: true,
+    data: {
+      enlaceUserId: registroResult.enlaceUserId,
+      alreadyExists: registroResult.alreadyExists,
+      warnings: registroResult.warnings,
+      enlaceUserRecordId: enlaceUser.id,
+    },
+  };
+}
+```
+
+**Características Clave**:
+- ✅ Usa nueva función `registrarUsuario()` (sin parámetro `page`)
+- ✅ Maneja duplicados (`alreadyExists`)
+- ✅ Maneja warnings (verificación fallida)
+- ✅ Persistencia con `prisma.enlaceUser.upsert()`
+- ✅ Logs detallados en cada paso
+- ✅ Error handling con stack traces
+- ✅ Retry logic (3 intentos con backoff)
+- ✅ Dead letter queue para fallos permanentes
+
+**Manejo de Errores Mejorado**:
+```typescript
+catch (error) {
+  // Log detallado con stack trace
+  await logTaskProgress(task.id, 'ERROR', 'Task execution failed', {
+    error: errorMessage,
+    stack: errorStack,
+    attempt: job.attemptsMade + 1,
+    maxAttempts: 3,
+  });
+
+  // Actualizar status del task
+  await prisma.task.update({
+    where: { id: task.id },
+    data: {
+      status: shouldRetry ? 'PENDING' : 'FAILED',
+      error: errorMessage,
+      failedAt: shouldRetry ? undefined : new Date(),
+    },
+  });
+
+  // Log final si falló permanentemente
+  if (!shouldRetry) {
+    await logTaskProgress(task.id, 'ERROR',
+      'Task failed permanently after max attempts');
+  }
+}
+```
+
+**Flujo Completo**:
+1. **Job recibido** de BullMQ queue
+2. **Task creado** en database (status: PROCESSING)
+3. **Browser lanzado** + autenticación en Enlace
+4. **Bot ejecutado** (registrarUsuario con userData)
+5. **Resultado guardado** en EnlaceUser
+6. **Logs creados** en TaskLog
+7. **Task actualizado** (status: COMPLETED)
+8. **Job completado** en BullMQ
 
 ---
 
@@ -528,5 +641,5 @@ git push origin main --tags
 ---
 
 **Última actualización**: 2026-02-08
-**Commits en GitHub**: 5 (e8e5012, 91aa0ce, 5047e74, e0fec58, 2bc1dc5)
+**Commits en GitHub**: 7 (e8e5012, 91aa0ce, 5047e74, e0fec58, 2bc1dc5, 91f2258, 150f71e)
 **Repository**: https://github.com/lubroule/ule-rpa.git

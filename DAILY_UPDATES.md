@@ -89,6 +89,54 @@ Log de actualizaciones diarias del proyecto ULE RPA Service.
     - extractFechaLimite() mejorado con múltiples formatos de fecha
     - ⏸️ Bot SE DETIENE en PSE (pago es Fase 8)
     - SUBFASE 3.1 100% COMPLETA
+17. ✅ **Subfase 3.2 COMPLETADA** - Bot de Llenado de Formulario PILA
+    - Constantes PILA 2025 agregadas (SMMLV_2025 = $1,423,500)
+    - Porcentajes de aportes: Salud 12.5%, Pensión 16%, ARL 0.522%-6.96%
+    - calcularAportesPila() - Helper de cálculo automático
+    - validarDatosPila() - Validación pre-vuelo de datos
+    - llenarFormularioPila() - Función principal de llenado
+    - 8+ funciones helper modulares para cada campo:
+      * fillPeriodo() - Maneja MES/ANIO separados o combinados
+      * fillDiasCotizados() - Días trabajados (1-30)
+      * fillIngresoBaseIBC() - IBC con validación mínima SMMLV
+      * fillSalud() - Salud con auto-cálculo detection
+      * fillPension() - Pensión con auto-cálculo detection
+      * fillARL() - ARL con nivel de riesgo
+      * verifyTotal() - Verificación de total con tolerancia ±100
+      * verificarCalculoAutomatico() - Detecta campos auto-calculados
+      * esFieldReadonly() - Detecta campos readonly/disabled
+    - Estrategias de fallback para diferentes layouts de Enlace
+    - Manejo robusto: skip readonly, detect auto-calc, multiple selectors
+    - navegarALiquidacion() - Pre-verificación con buscarUsuario()
+    - selectAportante() - 4 estrategias de selección de usuario
+    - seleccionarTipoLiquidacion() - Detección de tipo de formulario
+    - SUBFASE 3.2 100% COMPLETA
+18. ✅ **Subfase 3.3 COMPLETADA** - Bot de Confirmación y Navegación a PSE
+    - LiquidacionResultExtended interface agregada
+    - confirmarLiquidacion() - Flujo completo de confirmación (6 pasos)
+    - 10+ funciones helper para confirmación y PSE:
+      * clickCalcularButton() - Validación del formulario
+      * clickConfirmarButton() - 5 selectores de botón con fallback
+      * waitForSuccessMessage() - 6 estrategias de detección de éxito
+      * extractNumeroPlanilla() - 6+ estrategias de extracción
+      * extractFechaLimitePago() - Múltiples formatos de fecha
+      * parseFechaLimite() - DD/MM/YYYY y YYYY-MM-DD
+      * getDefaultFechaLimite() - 10 días hábiles (excluyendo fines de semana)
+      * navegarAPSE() - Navegación a PSE (NON-BLOCKING)
+      * clickPagarButton() - Botón inicial de pago
+      * selectPSEPaymentMethod() - Selección de radio PSE
+      * clickPagarConPSEButton() - Confirmación PSE
+      * waitForPSEPage() - Espera iframe/página PSE
+    - liquidarPilaConConfirmacion() - Orchestrador COMPLETO (RECOMENDADO)
+      * Step 1: Navegación y selección de usuario
+      * Step 2: Selección de tipo de liquidación
+      * Step 3: Llenado de formulario PILA
+      * Step 4: Confirmación y navegación a PSE (DETIENE)
+    - Manejo graceful: warnings array para errores no-críticos
+    - PSE navigation non-blocking (no falla si PSE no disponible)
+    - Logging detallado step-by-step con emojis
+    - ⏸️ Bot SE DETIENE en PSE - Pago es FASE 8
+    - SUBFASE 3.3 100% COMPLETA
 
 ### Archivos Creados:
 - `CONTEXT.md` (390 líneas) - Master context
@@ -113,14 +161,20 @@ Log de actualizaciones diarias del proyecto ULE RPA Service.
 - `73598ea` - feat: Complete testing system for Phase 2 (Subfase 2.9)
 - `d4c7f6d` - docs: Complete Phase 2 documentation (FASE-2-REGISTRO.md)
 - `985f11c` - feat: Phase 3.1 - Enhanced liquidation bot with PSE navigation
-- (pending) - docs: Update documentation for Subfase 3.1 completion
+- `f1e21ee` - feat: Phase 3.1 Part 2 - Advanced navigation functions
+- `2c4025d` - fix: Fix TypeScript errors in liquidation bot
+- `e1bec4b` - feat: Phase 3.2 - Complete PILA form filling system
+- `1dfe4d2` - feat: Phase 3.3 - Confirmation and PSE navigation system
+- (pending) - docs: Update documentation for Phase 3 completion (Subfases 3.1-3.3)
 
 ### Próximos Pasos (Siguientes 24h):
 - [x] ~~Subfase 3.1: Bot de Navegación a Liquidación con PSE~~ ✅ COMPLETADA
-- [ ] Subfase 3.2: Actualizar selectores desde sitio real de Enlace Operativo
-- [ ] Subfase 3.3: Testing E2E del flujo completo de liquidación
-- [ ] Subfase 3.4: Ajustar delays y comportamiento según sitio real
-- [ ] Documentación de Fase 3
+- [x] ~~Subfase 3.2: Bot de Llenado de Formulario PILA~~ ✅ COMPLETADA
+- [x] ~~Subfase 3.3: Bot de Confirmación y Navegación a PSE~~ ✅ COMPLETADA
+- [ ] Subfase 3.4: Actualizar selectores desde sitio real de Enlace Operativo
+- [ ] Subfase 3.5: Testing E2E del flujo completo de liquidación
+- [ ] Subfase 3.6: Ajustar delays y comportamiento según sitio real
+- [ ] Documentación completa de Fase 3
 
 ### Estado del Proyecto:
 **FASE 2 Completada (100%)**:
@@ -131,11 +185,13 @@ Log de actualizaciones diarias del proyecto ULE RPA Service.
 - ✅ Sistema de testing completo
 - ✅ Integración ULE completa
 
-**FASE 3 En Progreso (15%)**:
+**FASE 3 En Progreso (75%)**:
 - ✅ Subfase 3.1: Bot de Navegación a Liquidación con PSE (100%)
-- ⏳ Subfase 3.2: Actualizar selectores desde sitio real (0%)
-- ⏳ Subfase 3.3: Testing E2E con credenciales reales (0%)
-- ⏳ Subfase 3.4: Ajustar delays según sitio real (0%)
+- ✅ Subfase 3.2: Bot de Llenado de Formulario PILA (100%)
+- ✅ Subfase 3.3: Bot de Confirmación y Navegación a PSE (100%)
+- ⏳ Subfase 3.4: Actualizar selectores desde sitio real de Enlace Operativo (0%)
+- ⏳ Subfase 3.5: Testing E2E con credenciales reales (0%)
+- ⏳ Subfase 3.6: Ajustar delays según sitio real (0%)
 
 **Próximas Fases**:
 - FASE 4: Testing E2E completo end-to-end

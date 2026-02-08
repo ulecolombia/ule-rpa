@@ -1,9 +1,13 @@
 # ULE RPA Service - Progress Report
 
-## 🔄 FASE 3: Bot de Liquidación de PILA - EN PROGRESO
+## 🔄 FASE 3: Bot de Liquidación de PILA - EN PROGRESO (75% COMPLETO)
 
 ### Commits Realizados:
 1. **Commit 985f11c**: Phase 3.1 - Enhanced liquidation bot with PSE navigation
+2. **Commit f1e21ee**: Phase 3.1 Part 2 - Advanced navigation functions
+3. **Commit 2c4025d**: Fix TypeScript errors in liquidation bot
+4. **Commit e1bec4b**: Phase 3.2 - Complete PILA form filling system
+5. **Commit 1dfe4d2**: Phase 3.3 - Confirmation and PSE navigation system
 
 ### Subfases Completadas:
 
@@ -60,6 +64,187 @@
 - ✅ Extracción robusta de datos
 - ✅ Ready para testing E2E
 - ✅ Cumple requisitos de Fase 3.1
+
+#### Subfase 3.2: Bot de Llenado de Formulario PILA ✅
+**Fecha**: 2026-02-08
+**Commits**: f1e21ee, 2c4025d, e1bec4b
+
+**Constantes PILA 2025**:
+- ✅ `SMMLV_2025 = 1423500` - Salario mínimo legal mensual vigente
+- ✅ `PORCENTAJE_SALUD = 12.5` - Porcentaje de aporte a salud
+- ✅ `PORCENTAJE_PENSION = 16.0` - Porcentaje de aporte a pensión
+- ✅ `PORCENTAJES_ARL` - Niveles I-V (0.522% - 6.96%)
+
+**Funciones de Cálculo y Validación**:
+- ✅ `calcularAportesPila(ibc, dias, nivelRiesgoARL)` - Cálculo automático de aportes
+  - Calcula salud, pensión, ARL y total
+  - Aplica factor de días trabajados (días/30)
+  - Redondea valores correctamente
+- ✅ `validarDatosPila(pilaData)` - Validación pre-vuelo
+  - Valida formato de período (YYYY-MM)
+  - Valida IBC mínimo (>= SMMLV_2025)
+  - Valida días cotizados (1-30)
+  - Valida montos mínimos de aportes
+  - Retorna lista de errores detallados
+
+**Funciones de Navegación**:
+- ✅ `navegarALiquidacion(numeroDocumento)` - Navegación completa con verificación
+  - Pre-verifica usuario existe con `buscarUsuario()`
+  - Navega a generador de planillas
+  - Selecciona usuario aportante
+  - Retorna contexto de liquidación
+- ✅ `selectAportante(page, numeroDocumento)` - Selección de usuario con 4 estrategias
+  - Strategy 1: Select dropdown
+  - Strategy 2: Search input con autocomplete
+  - Strategy 3: Alternative search input
+  - Strategy 4: Direct selection button
+  - Fallback: Usuario pre-seleccionado
+- ✅ `seleccionarTipoLiquidacion(context)` - Selección de tipo de planilla
+  - Busca botón "Planilla en línea"
+  - Espera formulario de liquidación
+  - Detecta campos del formulario
+
+**Función Principal de Llenado**:
+- ✅ `llenarFormularioPila(context, pilaData)` - Llenado completo del formulario
+  - Validación previa de datos
+  - Llenado modular de cada campo
+  - Detección de auto-cálculo
+  - Detección de campos readonly
+  - Verificación de total con tolerancia ±100
+
+**8+ Funciones Helper Modulares**:
+- ✅ `fillPeriodo(page, periodo)` - Maneja MES/ANIO separados o combinados
+- ✅ `fillDiasCotizados(page, dias)` - Días trabajados (1-30)
+- ✅ `fillIngresoBaseIBC(page, pilaData)` - IBC con validación mínima
+- ✅ `fillSalud(page, salud)` - Salud con auto-cálculo detection
+- ✅ `fillPension(page, pension)` - Pensión con auto-cálculo detection
+- ✅ `fillARL(page, pilaData)` - ARL con nivel de riesgo
+- ✅ `verifyTotal(page, total)` - Verificación de total (tolerancia ±100)
+- ✅ `verificarCalculoAutomatico(page, selector)` - Detecta campos auto-calculados
+- ✅ `esFieldReadonly(page, selector)` - Detecta campos readonly/disabled
+
+**Estrategias de Robustez**:
+- ✅ Múltiples selectores con fallback para cada campo
+- ✅ Detección de auto-cálculo (skip manual entry)
+- ✅ Detección de readonly (skip disabled fields)
+- ✅ Manejo de diferentes layouts de Enlace
+- ✅ Logging detallado con emojis
+- ✅ Screenshots en errores
+
+**Resultado**:
+- ✅ Sistema completo de llenado de formulario PILA
+- ✅ Validación robusta pre-vuelo
+- ✅ Cálculo automático de aportes
+- ✅ Manejo de múltiples layouts
+- ✅ Ready para confirmación
+- ✅ Cumple requisitos de Fase 3.2
+
+#### Subfase 3.3: Bot de Confirmación y Navegación a PSE ✅
+**Fecha**: 2026-02-08
+**Commit**: 1dfe4d2
+
+**Nueva Interface**:
+- ✅ `LiquidacionResultExtended` - Resultado extendido con PSE
+  - `success: boolean`
+  - `numeroPlanilla?: string`
+  - `valorTotal?: number`
+  - `fechaLimite?: Date`
+  - `estadoPago: 'PENDIENTE' | 'EN_PROCESO'`
+  - `urlPSE?: string`
+  - `error?: string`
+  - `warnings?: string[]`
+
+**Función Principal de Confirmación**:
+- ✅ `confirmarLiquidacion(context, pilaData)` - Flujo completo de confirmación (6 pasos)
+  1. Click "Calcular" para validar formulario
+  2. Click "Confirmar" o "Generar planilla"
+  3. Esperar mensaje de éxito
+  4. Extraer número de planilla
+  5. Extraer fecha límite de pago
+  6. Navegar a PSE (DETIENE antes del pago)
+
+**10+ Funciones Helper para Confirmación**:
+- ✅ `clickCalcularButton(page)` - Validación del formulario
+  - Intenta múltiples selectores
+  - Espera respuesta de validación
+  - Detecta errores de validación
+- ✅ `clickConfirmarButton(page)` - Confirmación de liquidación
+  - 5 selectores de botón con fallback
+  - "Confirmar", "Generar planilla", "Liquidar", etc.
+  - Espera navegación/respuesta
+- ✅ `waitForSuccessMessage(page)` - Espera confirmación de éxito
+  - 6 estrategias de detección
+  - Selectores de mensajes de éxito
+  - Timeout 10 segundos
+
+**Funciones de Extracción de Datos**:
+- ✅ `extractNumeroPlanilla(page)` - 6+ estrategias de extracción
+  - Strategy 1: data-field attribute
+  - Strategy 2: data-planilla-numero attribute
+  - Strategy 3: .planilla-numero class
+  - Strategy 4: Regex pattern matching in text
+  - Strategy 5: Legacy RESULT selectors
+  - Strategy 6: Page content search
+- ✅ `extractFechaLimitePago(page)` - Extracción de fecha límite
+  - Múltiples selectores
+  - Parsing de múltiples formatos
+  - Fallback a fecha por defecto
+- ✅ `parseFechaLimite(fechaStr)` - Parser de fechas
+  - Formato DD/MM/YYYY (colombiano)
+  - Formato YYYY-MM-DD (ISO)
+  - Validación de fechas parseadas
+- ✅ `getDefaultFechaLimite()` - Fecha límite por defecto
+  - Calcula 10 días hábiles
+  - Excluye fines de semana
+  - Retorna Date object
+
+**Funciones de Navegación a PSE**:
+- ✅ `navegarAPSE(page)` - Navegación a PSE (NON-BLOCKING)
+  - Click botón "Pagar"
+  - Seleccionar método PSE
+  - Click "Pagar con PSE"
+  - Esperar página/iframe PSE
+  - **SE DETIENE** (no completa pago)
+  - Retorna URL de PSE o undefined
+  - No falla liquidación si PSE no disponible
+- ✅ `clickPagarButton(page)` - Botón inicial de pago
+- ✅ `selectPSEPaymentMethod(page)` - Selección de radio PSE
+- ✅ `clickPagarConPSEButton(page)` - Confirmación PSE
+- ✅ `waitForPSEPage(page)` - Espera iframe/página PSE
+
+**Orchestrador Completo (RECOMENDADO)**:
+- ✅ `liquidarPilaConConfirmacion(numeroDocumento, pilaData)` - Flujo completo end-to-end
+  - **Step 1/4**: Navegación a liquidación y selección de usuario
+  - **Step 2/4**: Selección de tipo de liquidación
+  - **Step 3/4**: Llenado de formulario PILA
+  - **Step 4/4**: Confirmación y navegación a PSE
+  - Logging detallado step-by-step con emojis
+  - Retorna `LiquidacionResultExtended`
+  - Manejo completo de errores
+
+**Características de Robustez**:
+- ✅ Graceful degradation con warnings array
+  - Errores no-críticos agregados a warnings
+  - No fallan la liquidación completa
+- ✅ PSE navigation non-blocking
+  - No falla liquidación si PSE no disponible
+  - Retorna success con warning
+- ✅ Múltiples estrategias de extracción de datos
+  - 6+ estrategias para planilla number
+  - Múltiples formatos de fecha
+  - Valores por defecto cuando no se encuentra
+- ✅ Logging detallado con emojis por paso
+- ✅ Screenshots en errores
+
+**Resultado**:
+- ✅ Sistema completo de confirmación de liquidación
+- ✅ Extracción robusta de datos (planilla, fecha, total)
+- ✅ Navegación a PSE implementada (DETIENE antes de pago)
+- ✅ Orchestrador completo end-to-end
+- ✅ Manejo graceful de errores con warnings
+- ✅ Ready para integración con worker
+- ✅ Cumple requisitos de Fase 3.3
+- ✅ **Pago queda pendiente para FASE 8**
 
 ---
 

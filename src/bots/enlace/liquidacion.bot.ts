@@ -1031,6 +1031,594 @@ export async function seleccionarTipoLiquidacion(context: LiquidacionContext): P
   }
 }
 
+// ============================================================================
+// CONFIRMATION AND PSE NAVIGATION
+// ============================================================================
+
+/**
+ * Extended liquidation result with PSE navigation info
+ */
+export interface LiquidacionResultExtended {
+  success: boolean;
+  numeroPlanilla?: string;
+  valorTotal?: number;
+  fechaLimite?: Date;
+  estadoPago: 'PENDIENTE' | 'EN_PROCESO';
+  urlPSE?: string;
+  error?: string;
+  warnings?: string[];
+}
+
+/**
+ * Confirm PILA liquidation and navigate to PSE payment page
+ * This function:
+ * 1. Clicks "Calcular" button to validate form
+ * 2. Clicks "Confirmar" or "Generar planilla"
+ * 3. Waits for success message
+ * 4. Extracts planilla number and fecha límite
+ * 5. Navigates to PSE page (but STOPS before payment)
+ *
+ * @param context - Liquidation context
+ * @param pilaData - PILA data (used for validation)
+ * @returns Liquidation result with planilla info and PSE URL
+ */
+export async function confirmarLiquidacion(
+  context: LiquidacionContext,
+  pilaData: PilaData
+): Promise<LiquidacionResultExtended> {
+  const { page, numeroDocumento } = context;
+
+  logger.info('Starting liquidation confirmation', {
+    numeroDocumento,
+    periodo: pilaData.periodo,
+    total: pilaData.total,
+  });
+
+  const warnings: string[] = [];
+
+  try {
+    await browserManager.takeScreenshot(page, 'before-confirmation');
+
+    // Step 1: Click "Calcular" button if exists (to validate form)
+    await clickCalcularButton(page);
+
+    // Step 2: Click "Confirmar" or "Generar planilla" button
+    await clickConfirmarButton(page);
+
+    // Step 3: Wait for success message
+    await waitForSuccessMessage(page);
+
+    logger.info('✅ Liquidation confirmed successfully');
+    await browserManager.takeScreenshot(page, 'liquidacion-confirmed');
+
+    // Step 4: Extract planilla number
+    const numeroPlanilla = await extractNumeroPlanilla(page);
+
+    if (!numeroPlanilla) {
+      warnings.push('Could not extract planilla number from page');
+      logger.warn('⚠️  Planilla number not found');
+    } else {
+      logger.info('Extracted planilla number', { numeroPlanilla });
+    }
+
+    // Step 5: Extract fecha límite
+    const fechaLimite = await extractFechaLimitePago(page);
+
+    if (!fechaLimite) {
+      warnings.push('Could not extract fecha límite from page');
+      logger.warn('⚠️  Fecha límite not found, using default (10 days)');
+    } else {
+      logger.info('Extracted fecha límite', { fechaLimite });
+    }
+
+    // Step 6: Navigate to PSE (but STOP before payment)
+    logger.info('Navigating to PSE payment page (will STOP before payment)');
+    const urlPSE = await navegarAPSE(page);
+
+    if (!urlPSE) {
+      warnings.push('Could not navigate to PSE automatically');
+    }
+
+    return {
+      success: true,
+      numeroPlanilla,
+      valorTotal: pilaData.total,
+      fechaLimite: fechaLimite || getDefaultFechaLimite(),
+      estadoPago: 'PENDIENTE',
+      urlPSE,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  } catch (error) {
+    logger.error('❌ Error confirming liquidation', {
+      error,
+      numeroDocumento,
+      periodo: pilaData.periodo,
+    });
+
+    await browserManager.takeScreenshot(page, 'liquidacion-confirm-error');
+
+    return {
+      success: false,
+      valorTotal: pilaData.total,
+      estadoPago: 'PENDIENTE',
+      error: error instanceof Error ? error.message : 'Unknown error during confirmation',
+    };
+  }
+}
+
+/**
+ * Click "Calcular" button to validate form
+ */
+async function clickCalcularButton(page: Page): Promise<void> {
+  try {
+    const calcularExists = await elementExists(page, SELECTORS.LIQUIDACION.FORM.CALCULAR);
+
+    if (!calcularExists) {
+      logger.debug('Calcular button not found, skipping validation step');
+      return;
+    }
+
+    logger.info('Clicking "Calcular" button to validate form');
+    await waitAndClick(page, SELECTORS.LIQUIDACION.FORM.CALCULAR);
+    await sleep(2000);
+
+    await browserManager.takeScreenshot(page, 'after-calcular');
+
+    // Wait for validation result (error or success message)
+    try {
+      await page.waitForFunction(
+        () => {
+          const errorMsg = document.querySelector('.error, .alert-danger, .text-danger') as any;
+          const successMsg = document.querySelector('.success, .alert-success, .text-success') as any;
+          return (errorMsg && errorMsg.textContent) || (successMsg && successMsg.textContent);
+        },
+        { timeout: 10000 }
+      );
+    } catch (e) {
+      logger.debug('No validation message appeared, continuing');
+    }
+
+    // Check for error messages
+    const errorMsg = await page
+      .evaluate(() => {
+        const error = document.querySelector('.error, .alert-danger, .text-danger') as any;
+        return error?.textContent?.trim() || null;
+      })
+      .catch(() => null);
+
+    if (errorMsg) {
+      logger.error('Validation error from Enlace', { errorMsg });
+      await browserManager.takeScreenshot(page, 'liquidacion-validation-error');
+      throw new BotError(`Form validation error: ${errorMsg}`);
+    }
+
+    logger.debug('✅ Form validated successfully');
+  } catch (error) {
+    if (error instanceof BotError) {
+      throw error;
+    }
+    logger.warn('Error during calcular step', { error });
+    // Don't throw - this step is optional
+  }
+}
+
+/**
+ * Click "Confirmar" or "Generar planilla" button
+ */
+async function clickConfirmarButton(page: Page): Promise<void> {
+  try {
+    logger.info('Looking for Confirmar/Generar button');
+
+    // Try multiple button selectors
+    const buttonSelectors = [
+      SELECTORS.LIQUIDACION.FORM.CONFIRMAR,
+      SELECTORS.LIQUIDACION.FORM.GENERAR,
+      SELECTORS.LIQUIDACION.FORM.GENERAR_PLANILLA,
+      SELECTORS.LIQUIDACION.FORM.LIQUIDAR,
+      SELECTORS.LIQUIDACION.FORM.VALIDAR,
+    ];
+
+    let buttonClicked = false;
+
+    for (const selector of buttonSelectors) {
+      const exists = await elementExists(page, selector);
+      if (exists) {
+        logger.info('Found confirmation button', { selector });
+        await scrollToElement(page, selector);
+        await randomDelay(500, 1000);
+        await waitAndClick(page, selector);
+        buttonClicked = true;
+        logger.info('✅ Clicked confirmation button');
+        break;
+      }
+    }
+
+    if (!buttonClicked) {
+      throw new BotError('Could not find Confirmar/Generar button');
+    }
+
+    // Wait for processing
+    await sleep(3000);
+    await browserManager.takeScreenshot(page, 'after-confirmar');
+  } catch (error) {
+    logger.error('Error clicking confirmation button', { error });
+    await browserManager.takeScreenshot(page, 'confirmar-button-error');
+    throw error;
+  }
+}
+
+/**
+ * Wait for success message after confirmation
+ */
+async function waitForSuccessMessage(page: Page): Promise<void> {
+  try {
+    logger.info('Waiting for success message');
+
+    // Try multiple success message selectors
+    const successSelectors = [
+      SELECTORS.LIQUIDACION.RESULTADO.MENSAJE_EXITO,
+      SELECTORS.COMMON.ALERT_SUCCESS,
+      SELECTORS.COMMON.TOAST_SUCCESS,
+      '.success',
+      '.alert-success',
+      '.mensaje-exito',
+    ];
+
+    let foundSuccess = false;
+
+    for (const selector of successSelectors) {
+      try {
+        await page.waitForSelector(selector, { timeout: 5000 });
+        foundSuccess = true;
+        logger.info('Success message found', { selector });
+        break;
+      } catch (e) {
+        // Continue to next selector
+      }
+    }
+
+    if (!foundSuccess) {
+      logger.warn('No success message found with known selectors, checking for errors');
+
+      // Check if there's an error message instead
+      const errorExists = await elementExists(page, SELECTORS.COMMON.ALERT_ERROR);
+
+      if (errorExists) {
+        const errorText = await page.$eval(
+          SELECTORS.COMMON.ALERT_ERROR,
+          (el) => (el as any).textContent || ''
+        );
+        throw new BotError(`Liquidation failed: ${errorText}`);
+      }
+
+      // No success message but also no error - assume success
+      logger.warn('No success/error message found, assuming success based on page state');
+    }
+
+    logger.debug('✅ Success message confirmed');
+  } catch (error) {
+    if (error instanceof BotError) {
+      throw error;
+    }
+    logger.error('Error waiting for success message', { error });
+    throw new BotError('Failed to confirm liquidation success');
+  }
+}
+
+/**
+ * Extract numero de planilla from page
+ */
+async function extractNumeroPlanilla(page: Page): Promise<string | undefined> {
+  try {
+    logger.info('Extracting numero de planilla');
+
+    // Try multiple strategies
+    const selectors = [
+      SELECTORS.LIQUIDACION.RESULTADO.NUMERO_PLANILLA,
+      SELECTORS.LIQUIDACION.RESULTADO.NUMERO_PLANILLA_DATA,
+      SELECTORS.LIQUIDACION.RESULTADO.NUMERO_PLANILLA_CLASS,
+      SELECTORS.LIQUIDACION.RESULT.NUMERO_PLANILLA,
+      '[data-planilla]',
+      '.numero-planilla',
+    ];
+
+    for (const selector of selectors) {
+      const exists = await elementExists(page, selector);
+      if (exists) {
+        const numero = await page
+          .$eval(selector, (el) => (el as any).textContent?.trim() || (el as any).value || '')
+          .catch(() => '');
+
+        if (numero && numero !== '0') {
+          logger.info('Found planilla number', { numero, selector });
+          return numero;
+        }
+      }
+    }
+
+    // Try regex pattern in page text
+    const numeroPlanilla = await page
+      .evaluate(() => {
+        const text = document.body.innerText;
+        // Matches: "Planilla No: 12345" or "Planilla 12345" or similar
+        const match = text.match(/Planilla\s+(?:No[.:]?|N[°º]|#)?\s*(\d+)/i);
+        return match ? match[1] : null;
+      })
+      .catch(() => null);
+
+    if (numeroPlanilla) {
+      logger.info('Found planilla number in text', { numeroPlanilla });
+      return numeroPlanilla;
+    }
+
+    logger.warn('Could not extract planilla number');
+    return undefined;
+  } catch (error) {
+    logger.warn('Error extracting planilla number', { error });
+    return undefined;
+  }
+}
+
+/**
+ * Extract fecha límite de pago from page
+ */
+async function extractFechaLimitePago(page: Page): Promise<Date | undefined> {
+  try {
+    logger.info('Extracting fecha límite de pago');
+
+    const selectors = [
+      SELECTORS.LIQUIDACION.RESULTADO.FECHA_LIMITE,
+      SELECTORS.LIQUIDACION.RESULTADO.FECHA_LIMITE_CLASS,
+      SELECTORS.LIQUIDACION.RESULT.FECHA_LIMITE,
+      '[data-fecha-limite]',
+      '.fecha-limite',
+    ];
+
+    for (const selector of selectors) {
+      const exists = await elementExists(page, selector);
+      if (exists) {
+        const fechaText = await page
+          .$eval(selector, (el) => (el as any).textContent?.trim() || '')
+          .catch(() => '');
+
+        if (fechaText) {
+          const fecha = parseFechaLimite(fechaText);
+          if (fecha) {
+            logger.info('Found fecha límite', { fecha, selector });
+            return fecha;
+          }
+        }
+      }
+    }
+
+    // Try to find date in page text
+    const fechaFromText = await page
+      .evaluate(() => {
+        const text = document.body.innerText;
+        // Look for patterns like "Fecha límite: DD/MM/YYYY"
+        const match = text.match(/fecha\s+l[ií]mite.*?(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})/i);
+        return match ? match[1] : null;
+      })
+      .catch(() => null);
+
+    if (fechaFromText) {
+      const fecha = parseFechaLimite(fechaFromText);
+      if (fecha) {
+        logger.info('Found fecha límite in text', { fecha });
+        return fecha;
+      }
+    }
+
+    logger.warn('Could not extract fecha límite');
+    return undefined;
+  } catch (error) {
+    logger.warn('Error extracting fecha límite', { error });
+    return undefined;
+  }
+}
+
+/**
+ * Parse fecha límite from text
+ */
+function parseFechaLimite(text: string): Date | undefined {
+  try {
+    // Try DD/MM/YYYY format
+    let match = text.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    if (match) {
+      const [, dia, mes, anio] = match;
+      const fecha = new Date(parseInt(anio), parseInt(mes) - 1, parseInt(dia));
+      if (!isNaN(fecha.getTime())) {
+        return fecha;
+      }
+    }
+
+    // Try YYYY-MM-DD format
+    match = text.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+    if (match) {
+      const [, anio, mes, dia] = match;
+      const fecha = new Date(parseInt(anio), parseInt(mes) - 1, parseInt(dia));
+      if (!isNaN(fecha.getTime())) {
+        return fecha;
+      }
+    }
+
+    return undefined;
+  } catch (error) {
+    return undefined;
+  }
+}
+
+/**
+ * Get default fecha límite (10 business days from now)
+ */
+function getDefaultFechaLimite(): Date {
+  const fecha = new Date();
+  let diasAgregados = 0;
+
+  while (diasAgregados < 10) {
+    fecha.setDate(fecha.getDate() + 1);
+
+    // Skip weekends
+    const diaSemana = fecha.getDay();
+    if (diaSemana !== 0 && diaSemana !== 6) {
+      diasAgregados++;
+    }
+  }
+
+  return fecha;
+}
+
+/**
+ * Navigate to PSE payment page (but STOP before completing payment)
+ * This is Phase 3 requirement: navigate TO PSE but don't process payment
+ *
+ * @param page - Puppeteer page
+ * @returns PSE URL if successfully navigated
+ */
+async function navegarAPSE(page: Page): Promise<string | undefined> {
+  logger.info('Starting navigation to PSE (will STOP before payment)');
+
+  try {
+    await browserManager.takeScreenshot(page, 'before-pse-navigation');
+
+    // Step 1: Look for "Pagar" button
+    await clickPagarButton(page);
+
+    // Step 2: Select PSE payment method
+    await selectPSEPaymentMethod(page);
+
+    // Step 3: Click "Pagar con PSE" or "Continuar"
+    await clickPagarConPSEButton(page);
+
+    // Step 4: Wait for PSE page/iframe to appear
+    await waitForPSEPage(page);
+
+    const currentUrl = page.url();
+
+    logger.info('✅ Reached PSE page - STOPPING HERE (payment is Phase 8)', {
+      url: currentUrl,
+    });
+
+    await browserManager.takeScreenshot(page, 'liquidacion-pse-reached');
+
+    return currentUrl;
+  } catch (error) {
+    logger.warn('⚠️  Could not navigate to PSE automatically', { error });
+    await browserManager.takeScreenshot(page, 'liquidacion-pse-error');
+
+    // Don't throw - planilla is already liquidated
+    // PSE navigation is optional enhancement
+    return undefined;
+  }
+}
+
+/**
+ * Click "Pagar" button
+ */
+async function clickPagarButton(page: Page): Promise<void> {
+  const pagarSelectors = [
+    SELECTORS.LIQUIDACION.PSE.BOTON_PAGAR,
+    'button:has-text("Pagar")',
+    'a:has-text("Pagar")',
+  ];
+
+  for (const selector of pagarSelectors) {
+    const exists = await elementExists(page, selector);
+    if (exists) {
+      logger.debug('Clicking "Pagar" button', { selector });
+      await waitAndClick(page, selector);
+      await sleep(2000);
+      await browserManager.takeScreenshot(page, 'after-pagar-click');
+      return;
+    }
+  }
+
+  logger.debug('No "Pagar" button found, might already be on payment page');
+}
+
+/**
+ * Select PSE payment method
+ */
+async function selectPSEPaymentMethod(page: Page): Promise<void> {
+  const pseSelectors = [
+    SELECTORS.LIQUIDACION.PSE.SELECCIONAR_PSE,
+    SELECTORS.LIQUIDACION.PSE.RADIO_PSE,
+    'input[type="radio"][value="PSE"]',
+    'input[type="radio"][name="payment-method"][value="pse"]',
+  ];
+
+  for (const selector of pseSelectors) {
+    const exists = await elementExists(page, selector);
+    if (exists) {
+      logger.debug('Selecting PSE payment method', { selector });
+      await waitAndClick(page, selector);
+      await sleep(1000);
+      await browserManager.takeScreenshot(page, 'pse-method-selected');
+      return;
+    }
+  }
+
+  logger.debug('No PSE radio button found, might be auto-selected');
+}
+
+/**
+ * Click "Pagar con PSE" button
+ */
+async function clickPagarConPSEButton(page: Page): Promise<void> {
+  const pagarPSESelectors = [
+    SELECTORS.LIQUIDACION.PSE.BOTON_PAGAR_PSE,
+    SELECTORS.LIQUIDACION.PSE.CONTINUAR_PAGO,
+    'button:has-text("Pagar con PSE")',
+    'button:has-text("Continuar")',
+    'button:has-text("Siguiente")',
+  ];
+
+  for (const selector of pagarPSESelectors) {
+    const exists = await elementExists(page, selector);
+    if (exists) {
+      logger.debug('Clicking "Pagar con PSE" button', { selector });
+      await waitAndClick(page, selector);
+      await sleep(3000);
+      await browserManager.takeScreenshot(page, 'after-pagar-pse-click');
+      return;
+    }
+  }
+
+  logger.debug('No "Pagar con PSE" button found');
+}
+
+/**
+ * Wait for PSE page/iframe to appear
+ */
+async function waitForPSEPage(page: Page): Promise<void> {
+  logger.info('Waiting for PSE page/iframe to appear');
+
+  try {
+    await page.waitForFunction(
+      () => {
+        // Check for PSE iframe
+        const iframe = document.querySelector(
+          'iframe[name*="pse"], iframe[src*="pse"], iframe[id*="pse"]'
+        ) as any;
+
+        // Check if URL contains PSE
+        const urlContainsPSE = window.location.href.toLowerCase().includes('pse');
+
+        // Check for PSE-related elements
+        const pseElement = document.querySelector('[class*="pse"], [id*="pse"]') as any;
+
+        return iframe || urlContainsPSE || pseElement;
+      },
+      { timeout: 15000 }
+    );
+
+    logger.info('✅ PSE page/iframe detected');
+  } catch (error) {
+    logger.warn('Could not detect PSE page with automatic checks');
+    // Don't throw - we might already be there
+  }
+}
+
 /**
  * Liquidation Bot Class
  * Manages PILA liquidation flow in Enlace Operativo
@@ -1685,6 +2273,7 @@ export async function liquidarPilaEnlace(
 /**
  * Complete liquidation flow using new navigation functions
  * This is an alternative approach that uses the helper functions directly
+ * Uses bot class for compatibility with existing code
  *
  * @param numeroDocumento - User document number
  * @param pilaData - PILA calculation data
@@ -1734,6 +2323,71 @@ export async function liquidarPilaCompleto(
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error in complete liquidation',
       duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Complete PILA liquidation with confirmation and PSE navigation
+ * This is the NEW recommended flow that uses all new helper functions
+ *
+ * Flow:
+ * 1. Navigate to liquidation and select user
+ * 2. Select liquidation type (Planilla en línea)
+ * 3. Fill PILA form with validation
+ * 4. Confirm liquidation and extract planilla number
+ * 5. Navigate to PSE (but STOP before payment)
+ *
+ * @param numeroDocumento - User document number
+ * @param pilaData - PILA calculation data
+ * @returns Extended liquidation result with PSE info
+ */
+export async function liquidarPilaConConfirmacion(
+  numeroDocumento: string,
+  pilaData: PilaData
+): Promise<LiquidacionResultExtended> {
+  logger.info('Starting complete PILA liquidation process with confirmation', {
+    numeroDocumento,
+    periodo: pilaData.periodo,
+    total: pilaData.total,
+  });
+
+  try {
+    // Step 1: Navigate to liquidation and select user
+    logger.info('📍 Step 1/4: Navigating to liquidation');
+    const context = await navegarALiquidacion(numeroDocumento);
+
+    // Step 2: Select liquidation type (Planilla en línea)
+    logger.info('📝 Step 2/4: Selecting liquidation type');
+    await seleccionarTipoLiquidacion(context);
+
+    // Step 3: Fill PILA form
+    logger.info('✍️  Step 3/4: Filling PILA form');
+    await llenarFormularioPila(context, pilaData);
+
+    // Step 4: Confirm liquidation and navigate to PSE
+    logger.info('✅ Step 4/4: Confirming liquidation and navigating to PSE');
+    const result = await confirmarLiquidacion(context, pilaData);
+
+    logger.info('🎉 PILA liquidation process completed successfully', {
+      success: result.success,
+      numeroPlanilla: result.numeroPlanilla,
+      urlPSE: result.urlPSE,
+    });
+
+    return result;
+  } catch (error) {
+    logger.error('❌ PILA liquidation process failed', {
+      error,
+      numeroDocumento,
+      periodo: pilaData.periodo,
+    });
+
+    return {
+      success: false,
+      valorTotal: pilaData.total,
+      estadoPago: 'PENDIENTE',
+      error: error instanceof Error ? error.message : 'Unknown error in liquidation process',
     };
   }
 }

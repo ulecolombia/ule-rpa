@@ -48,11 +48,20 @@ Colombian independent workers must pay monthly PILA contributions (health, pensi
 - ✅ Dead letter queue for permanent failures
 - ✅ Arquitectura refactorizada: bots manejan su propio browser/auth
 
+**ULE Integration (Complete) ✅**:
+- ✅ **API REST** - 6 endpoints documentados (registro, liquidación, comprobante, consultas)
+- ✅ **API Key Authentication** - Middleware de seguridad con x-api-key
+- ✅ **TypeScript Client** - RPAClient con retry logic y polling helpers
+- ✅ **Types Package** - Tipos completos para requests/responses
+- ✅ **Next.js Examples** - 3 ejemplos completos (profile, liquidación, comprobante)
+- ✅ **Webhook Support** - Notificaciones async con signature validation
+- ✅ **Documentation** - ULE_INTEGRATION.md con guía completa
+
 **Statistics**:
-- 58 files modified/created
-- 11,800+ lines of code
-- 8,000+ lines of documentation
-- 8 commits pushed to GitHub (1 pending)
+- 64 files modified/created
+- 12,500+ lines of code
+- 9,500+ lines of documentation
+- 9 commits pushed to GitHub (1 pending)
 
 **Git Commits**:
 - `e8e5012` - Complete RPA bot system implementation

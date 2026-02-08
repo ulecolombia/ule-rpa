@@ -483,15 +483,262 @@ Task.update(COMPLETED)
 
 ---
 
+### 9. Integración con ULE (Webhook) ✅ (Subfase 2.8)
+**Fecha**: 2026-02-08
+**Archivos**: `integration/` (nuevo directorio)
+
+**Funcionalidad**:
+Sistema completo de integración entre la aplicación ULE y el servicio RPA mediante API REST.
+
+#### Arquitectura de Integración:
+```
+ULE Application (Next.js)
+    ↓ HTTP Request
+RPA Service API (/api/tasks/*)
+    ↓ Job Queue
+BullMQ + Redis
+    ↓ Worker
+Bot Execution → Enlace Operativo
+    ↓ Result
+Database → ULE (via webhook/polling)
+```
+
+#### Archivos de Integración Creados:
+
+**1. Documentación**:
+- `integration/ULE_INTEGRATION.md` (350+ líneas)
+  - Guía completa de integración
+  - Endpoints disponibles
+  - Ejemplos de uso
+  - Manejo de errores
+  - Troubleshooting
+
+**2. Ejemplos Next.js**:
+- `integration/examples/ule-profile-complete.ts`
+  - Integración en el flujo de onboarding
+  - POST/GET handlers para perfil de usuario
+  - Llamada automática al RPA al completar perfil
+  - Tracking de taskId en BD
+
+- `integration/examples/ule-liquidacion.ts`
+  - Cálculo automático de aportes PILA
+  - Integración con liquidación en Enlace
+  - Callback de PSE
+  - Webhook handler
+
+- `integration/examples/ule-comprobante.ts`
+  - Descarga automática post-pago
+  - Verificación de comprobante
+  - Auto-request 2 minutos después de pago
+
+**3. Configuración**:
+- `integration/ule-env.example`
+  - Variables de entorno necesarias
+  - RPA_SERVICE_URL
+  - RPA_API_KEY
+  - RPA_WEBHOOK_SECRET
+
+**4. TypeScript Types**:
+- `integration/types/rpa-client.types.ts`
+  - Tipos para todas las requests/responses
+  - TaskStatus, TaskType, TaskLog
+  - RPAUserData, RPAPilaData
+  - Webhook payloads
+
+**5. Cliente HTTP**:
+- `integration/lib/rpa-client.ts` (320+ líneas)
+  - Clase RPAClient con todos los métodos
+  - Manejo de errores custom (RPAClientError)
+  - Retry logic con exponential backoff
+  - Polling helpers (pollTask, waitForTask)
+  - Safe wrappers para logging
+
+#### API Endpoints Documentados:
+
+**POST /api/tasks/registro**:
+```typescript
+Request: { uleUserId, userData: { tipoDocumento, numeroDocumento, ... } }
+Response: { message, taskId }
+```
+- Crea tarea de registro automático
+- Valida duplicados (409 si ya existe)
+- Retorna taskId para tracking
+
+**POST /api/tasks/liquidacion**:
+```typescript
+Request: { uleUserId, paymentId, pilaData: { periodo, ibc, salud, ... } }
+Response: { message, taskId }
+```
+- Verifica que usuario esté registrado
+- Crea tarea de liquidación PILA
+- Genera numeroPlanilla
+
+**POST /api/tasks/comprobante**:
+```typescript
+Request: { uleUserId, numeroPlanilla, periodo }
+Response: { message, taskId }
+```
+- Verifica que planilla exista
+- Descarga PDF del comprobante
+- Guarda metadata en BD
+
+**GET /api/tasks/:taskId**:
+```typescript
+Response: { task: { id, type, status, resultData, logs, ... } }
+```
+- Consulta estado en tiempo real
+- Incluye logs detallados
+- Datos del resultado
+
+**GET /api/tasks?userId=X&status=Y**:
+- Lista tareas con filtros
+- Paginación (50 tareas max)
+
+**GET /api/tasks/stats/summary**:
+- Estadísticas de cola (waiting, active, completed, failed)
+- Estadísticas de BD por status
+
+#### Flujos de Integración Implementados:
+
+**Flujo 1: Onboarding Automático**
+```
+Usuario completa perfil en ULE
+    ↓
+ULE.POST /api/user/profile
+    ↓ guarda en BD
+    ↓ llama RPA
+RPA.POST /api/tasks/registro
+    ↓ retorna taskId
+ULE guarda taskId
+    ↓ (opcional polling)
+ULE.GET /api/tasks/:taskId
+    ↓ status COMPLETED
+ULE.UPDATE enlaceUserId en BD
+```
+
+**Flujo 2: Liquidación PILA**
+```
+Usuario solicita liquidación para periodo X
+    ↓
+ULE calcula aportes (12.5% + 16% + 0.522%)
+    ↓ crea orden de pago
+ULE.POST /api/tasks/liquidacion
+    ↓ retorna taskId
+(Worker ejecuta → Bot liquida → Retorna numeroPlanilla)
+    ↓
+ULE polling o webhook
+    ↓ actualiza numeroPlanilla en BD
+Usuario procede a pagar
+```
+
+**Flujo 3: Descarga Post-Pago**
+```
+Usuario completa pago PSE
+    ↓
+PSE callback → ULE
+    ↓ confirma pago
+ULE marca payment.status = PAID
+    ↓ espera 2 minutos
+ULE.POST /api/tasks/comprobante
+    ↓ (Worker descarga PDF)
+RPA webhook → ULE
+    ↓
+ULE guarda comprobante en BD
+    ↓ notifica usuario
+Usuario descarga comprobante
+```
+
+#### Cliente RPAClient Features:
+
+```typescript
+// Crear cliente
+const rpaClient = new RPAClient({
+  baseUrl: 'http://localhost:3001',
+  apiKey: 'your-api-key',
+  timeout: 30000
+});
+
+// Crear tareas
+const { taskId } = await rpaClient.createRegistroTask({ ... });
+
+// Polling automático
+const task = await rpaClient.pollTask(taskId, 2000, 150);
+
+// Polling con callback
+await rpaClient.waitForTask(taskId, (task) => {
+  console.log('Status:', task.status);
+});
+
+// Retry automático con exponential backoff
+await rpaClient.createLiquidacionTask(data, {
+  retries: 3,
+  retryDelay: 1000
+});
+```
+
+#### Seguridad Implementada:
+
+**Autenticación**:
+- API Key en header `x-api-key`
+- Validación en middleware (401 si inválida)
+- API Key debe ser 32+ caracteres
+
+**Webhooks**:
+- Secret en header `x-webhook-signature`
+- Validación antes de procesar
+
+**Rate Limiting**:
+- Máximo 10 jobs por minuto
+- Worker procesa 3 tareas concurrentes
+
+#### Características del Cliente:
+
+✅ TypeScript types completos
+✅ Error handling custom (RPAClientError)
+✅ Retry logic configurable
+✅ Exponential backoff
+✅ Timeout configurable
+✅ Polling helpers
+✅ Safe wrappers con logging
+✅ AbortController para timeouts
+✅ Singleton instance por defecto
+
+#### Testing:
+
+**cURL Examples incluidos en docs**:
+```bash
+# Registro
+curl -X POST http://localhost:3001/api/tasks/registro \
+  -H "x-api-key: YOUR_KEY" \
+  -d '{"uleUserId":"user123", "userData":{...}}'
+
+# Consultar estado
+curl -X GET http://localhost:3001/api/tasks/abc123 \
+  -H "x-api-key: YOUR_KEY"
+```
+
+**Resultado**:
+- ✅ Integración completa ULE ↔ RPA
+- ✅ Documentación exhaustiva (350+ líneas)
+- ✅ 3 ejemplos completos de Next.js
+- ✅ Cliente TypeScript con retry logic
+- ✅ Tipos completos para TypeScript
+- ✅ Variables de entorno configuradas
+- ✅ Seguridad con API Key + Webhook Secret
+- ✅ Ready para implementación en ULE
+
+---
+
 ## 📊 Estadísticas del Proyecto
 
 ### Archivos Creados/Modificados:
 ```
-Total: 58 archivos
-Líneas de código: +11,800
+Total: 64 archivos
+Líneas de código: +12,500
 Bots: 5 bots completos
 Worker: 4 casos completamente integrados (REGISTRO, LIQUIDACION, COMPROBANTE, FULL_FLOW)
-Documentación: 8,000+ líneas (incluye sistema completo de documentación)
+Integración: Sistema completo ULE ↔ RPA (API + Cliente + Types + Ejemplos)
+Documentación: 9,500+ líneas (incluye sistema completo + guías de integración)
 ```
 
 ### Cobertura de Funcionalidad:

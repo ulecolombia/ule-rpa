@@ -1,0 +1,57 @@
+# ==========================================
+# ULE Application - Environment Variables
+# ==========================================
+# Copiar este archivo a .env.local en tu proyecto ULE
+
+# ==========================================
+# RPA Service Configuration
+# ==========================================
+
+# URL del servicio RPA
+# Development:
+RPA_SERVICE_URL=http://localhost:3001
+# Production:
+# RPA_SERVICE_URL=https://rpa.tudominio.com
+
+# API Key para autenticar requests al RPA
+# IMPORTANTE: Debe ser la misma que API_KEY en el servicio RPA
+# Generar con: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+RPA_API_KEY=8f4a9c6e2d1b5f7e3a9d4c8b1e6f2a7c5d9e1b4f7a2c6d3e8b9f1a5c7d2e4b6
+
+# ==========================================
+# Webhook Configuration (Opcional)
+# ==========================================
+
+# Secret para validar webhooks del RPA
+# Generar con: node -e "console.log(require('crypto').randomBytes(16).toString('hex'))"
+RPA_WEBHOOK_SECRET=your-webhook-secret-here
+
+# ==========================================
+# Database Configuration (ULE)
+# ==========================================
+
+DATABASE_URL=postgresql://user:password@localhost:5432/ule_db
+
+# ==========================================
+# PSE Configuration (Pagos)
+# ==========================================
+
+PSE_MERCHANT_ID=your-merchant-id
+PSE_API_KEY=your-pse-api-key
+PSE_CALLBACK_URL=https://ule.tudominio.com/api/payments/pse/callback
+
+# ==========================================
+# Email Notifications
+# ==========================================
+
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=noreply@tudominio.com
+SMTP_PASSWORD=your-smtp-password
+
+# ==========================================
+# Next.js Configuration
+# ==========================================
+
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+NODE_ENV=development

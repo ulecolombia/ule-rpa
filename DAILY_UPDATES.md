@@ -42,6 +42,15 @@ Log de actualizaciones diarias del proyecto ULE RPA Service.
     - Cada bot maneja su propio browser usando enlaceAuth singleton
     - Agregado campo `numeroPlanilla` a TaskInput type
     - FASE 2 100% COMPLETA - Ready para testing E2E
+13. ✅ **Subfase 2.8 COMPLETADA** - Integración con ULE (Webhook)
+    - Documentación completa de integración ULE ↔ RPA (350+ líneas)
+    - 3 ejemplos Next.js completos (profile, liquidación, comprobante)
+    - Cliente TypeScript (RPAClient) con retry logic y polling (320+ líneas)
+    - Tipos completos para todas las requests/responses
+    - Variables de entorno configuradas (ule-env.example)
+    - Seguridad con API Key + Webhook Secret
+    - Flujos completos: Onboarding, Liquidación, Descarga post-pago
+    - Ready para implementación en aplicación ULE
 
 ### Archivos Creados:
 - `CONTEXT.md` (390 líneas) - Master context
@@ -61,7 +70,8 @@ Log de actualizaciones diarias del proyecto ULE RPA Service.
 - `91f2258` - docs: Update PROGRESS.md with documentation system details
 - `150f71e` - feat: Implement complete REGISTRO worker handler (Subfase 2.4)
 - `d10619a` - docs: Update documentation for Subfase 2.4 completion
-- (pending) - feat: Complete worker integration for all bots (Subfases 2.5-2.7)
+- `789fb17` - feat: Complete worker integration for all bots (Subfases 2.5-2.7)
+- (pending) - feat: Complete ULE integration system (Subfase 2.8)
 
 ### Próximos Pasos (Siguientes 24h):
 - [ ] Crear script de actualización automática (`scripts/update-docs.js`)

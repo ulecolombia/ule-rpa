@@ -20,6 +20,300 @@ import {
 import { browserManager } from '../utils/browser';
 import { BotError } from '../../utils/errors';
 import { enlaceAuth } from './auth.bot';
+import { buscarUsuario } from './search.bot';
+
+/**
+ * Context for liquidation operations
+ */
+export interface LiquidacionContext {
+  page: Page;
+  numeroDocumento: string;
+  enlaceUserId?: string;
+}
+
+/**
+ * Navigate to PILA Liquidation section and select user
+ * This function handles different layouts and user selection methods in Enlace
+ *
+ * @param numeroDocumento - User document number to search for
+ * @returns Context object with page and user information
+ */
+export async function navegarALiquidacion(numeroDocumento: string): Promise<LiquidacionContext> {
+  logger.info('Navigating to PILA liquidation', { numeroDocumento });
+
+  try {
+    // 1. Verify user exists in Enlace
+    logger.info('Verifying user exists in Enlace', { numeroDocumento });
+    const userSearch = await buscarUsuario(numeroDocumento);
+
+    if (!userSearch.found) {
+      throw new BotError(`User not found in Enlace: ${numeroDocumento}`);
+    }
+
+    logger.info('User found in Enlace', {
+      numeroDocumento,
+      enlaceUserId: userSearch.enlaceUserId,
+      nombre: userSearch.nombre,
+    });
+
+    // 2. Get authenticated page
+    const page = await enlaceAuth.ensureAuthenticated();
+
+    // 3. Navigate to generador de planillas
+    logger.info('Navigating to planilla generator');
+    await browserManager.takeScreenshot(page, 'before-liquidacion-nav');
+
+    const baseUrl = process.env.ENLACE_BASE_URL || URL_PATTERNS.BASE;
+    const liquidacionUrl = `${baseUrl}/generador-planillas/#/`;
+
+    await page.goto(liquidacionUrl, {
+      waitUntil: 'networkidle0',
+      timeout: 30000,
+    });
+
+    await sleep(3000);
+    await browserManager.takeScreenshot(page, 'liquidacion-page-loaded');
+
+    // 4. Search and select user (handles multiple layouts)
+    logger.info('Looking for user selector');
+    await selectAportante(page, numeroDocumento);
+
+    // 5. Verify we're on the correct page
+    await browserManager.takeScreenshot(page, 'liquidacion-user-selected');
+
+    logger.info('✅ Successfully navigated to liquidation with user selected', {
+      numeroDocumento,
+      enlaceUserId: userSearch.enlaceUserId,
+    });
+
+    return {
+      page,
+      numeroDocumento,
+      enlaceUserId: userSearch.enlaceUserId,
+    };
+  } catch (error) {
+    logger.error('❌ Error navigating to liquidation', { numeroDocumento, error });
+    throw error;
+  }
+}
+
+/**
+ * Select aportante (user) in liquidation page
+ * Handles different selection methods:
+ * - Select dropdown
+ * - Search input with autocomplete
+ * - Direct list selection
+ *
+ * @param page - Puppeteer page
+ * @param numeroDocumento - User document number
+ */
+async function selectAportante(page: Page, numeroDocumento: string): Promise<void> {
+  try {
+    // Strategy 1: Select dropdown
+    const selectExists = await elementExists(page, SELECTORS.LIQUIDACION.SELECT_APORTANTE);
+
+    if (selectExists) {
+      logger.info('Found aportante select dropdown');
+      await browserManager.takeScreenshot(page, 'liquidacion-select-found');
+
+      // Try to select by value or text containing document number
+      const selected = await page.evaluate((doc: string) => {
+        const select = document.querySelector('select[name="aportante"]') as any;
+        if (!select) return false;
+
+        const options = Array.from(select.options) as any[];
+
+        // Try to find option by text (usually contains document number)
+        let matchingOption = options.find(
+          (opt: any) => opt.text.includes(doc) || opt.value.includes(doc)
+        );
+
+        // If not found, try partial match
+        if (!matchingOption) {
+          matchingOption = options.find((opt: any) => {
+            const text = opt.text.toLowerCase();
+            const docLower = doc.toLowerCase();
+            return text.includes(docLower);
+          });
+        }
+
+        if (matchingOption) {
+          select.value = matchingOption.value;
+          // Trigger change event (important for React/Vue apps)
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          select.dispatchEvent(new Event('input', { bubbles: true }));
+          return true;
+        }
+        return false;
+      }, numeroDocumento);
+
+      if (!selected) {
+        throw new BotError(`Could not find user in aportante dropdown: ${numeroDocumento}`);
+      }
+
+      await sleep(2000);
+      await browserManager.takeScreenshot(page, 'liquidacion-select-done');
+      logger.info('✅ User selected via dropdown');
+      return;
+    }
+
+    // Strategy 2: Search input with autocomplete
+    const searchInputExists = await elementExists(page, SELECTORS.LIQUIDACION.BUSCAR_APORTANTE_INPUT);
+
+    if (searchInputExists) {
+      logger.info('Found aportante search input');
+      await browserManager.takeScreenshot(page, 'liquidacion-search-found');
+
+      // Type document number
+      await waitAndType(page, SELECTORS.LIQUIDACION.BUSCAR_APORTANTE_INPUT, numeroDocumento, {
+        clear: true,
+        delay: 100,
+      });
+
+      await sleep(2000);
+      await browserManager.takeScreenshot(page, 'liquidacion-search-typed');
+
+      // Try pressing Enter first
+      await page.keyboard.press('Enter');
+      await sleep(1500);
+
+      // Try to click on search result
+      const clicked = await page.evaluate((doc: string) => {
+        // Try multiple selectors for search results
+        const resultSelectors = [
+          '[data-search-result]',
+          '.search-result',
+          '.autocomplete-result',
+          '.dropdown-item',
+          'li[role="option"]',
+        ];
+
+        for (const selector of resultSelectors) {
+          const results = document.querySelectorAll(selector);
+          for (const result of Array.from(results)) {
+            const text = (result as any).textContent || '';
+            if (text.includes(doc)) {
+              (result as any).click();
+              return true;
+            }
+          }
+        }
+        return false;
+      }, numeroDocumento);
+
+      if (clicked) {
+        await sleep(2000);
+        await browserManager.takeScreenshot(page, 'liquidacion-search-selected');
+        logger.info('✅ User selected via search input');
+        return;
+      }
+
+      logger.warn('Could not click search result, continuing anyway');
+      await sleep(1000);
+      return;
+    }
+
+    // Strategy 3: Alternative search input selector
+    const altSearchExists = await elementExists(page, SELECTORS.LIQUIDACION.BUSCAR_APORTANTE);
+
+    if (altSearchExists) {
+      logger.info('Found alternative aportante search input');
+      await waitAndType(page, SELECTORS.LIQUIDACION.BUSCAR_APORTANTE, numeroDocumento, {
+        clear: true,
+        delay: 100,
+      });
+      await sleep(2000);
+      await page.keyboard.press('Enter');
+      await sleep(2000);
+      logger.info('✅ User searched via alternative input');
+      return;
+    }
+
+    // Strategy 4: Direct selection button
+    const selectButtonExists = await elementExists(page, SELECTORS.LIQUIDACION.SELECCIONAR_APORTANTE);
+
+    if (selectButtonExists) {
+      logger.info('Found select aportante button');
+      await waitAndClick(page, SELECTORS.LIQUIDACION.SELECCIONAR_APORTANTE);
+      await sleep(2000);
+      logger.info('✅ User selected via button');
+      return;
+    }
+
+    // If none of the above worked, user might already be selected
+    logger.warn('No user selector found - user might be pre-selected or layout is different');
+    await browserManager.takeScreenshot(page, 'liquidacion-no-selector');
+  } catch (error) {
+    logger.error('Error selecting aportante', { error, numeroDocumento });
+    await browserManager.takeScreenshot(page, 'liquidacion-select-error');
+    throw new BotError('Failed to select aportante for liquidation');
+  }
+}
+
+/**
+ * Select liquidation type (e.g., "Planilla en línea")
+ * Some Enlace layouts require selecting the type of liquidation before showing the form
+ *
+ * @param context - Liquidation context
+ */
+export async function seleccionarTipoLiquidacion(context: LiquidacionContext): Promise<void> {
+  const { page } = context;
+
+  logger.info('Selecting liquidation type: Planilla en línea');
+
+  try {
+    await browserManager.takeScreenshot(page, 'before-tipo-liquidacion');
+
+    // Look for "Planilla en línea" button
+    const planillaEnLineaExists = await elementExists(page, SELECTORS.LIQUIDACION.PLANILLA_EN_LINEA);
+
+    if (planillaEnLineaExists) {
+      logger.info('Found "Planilla en línea" button');
+      await waitAndClick(page, SELECTORS.LIQUIDACION.PLANILLA_EN_LINEA);
+      await sleep(2000);
+      await browserManager.takeScreenshot(page, 'planilla-en-linea-selected');
+      logger.info('✅ Selected "Planilla en línea"');
+    } else {
+      logger.info('No liquidation type selection needed, form may already be visible');
+    }
+
+    // Wait for liquidation form to appear
+    logger.info('Waiting for liquidation form to load');
+
+    // Try multiple form field selectors
+    const formSelectors = [
+      SELECTORS.LIQUIDACION.FORM.MES,
+      SELECTORS.LIQUIDACION.FORM.PERIODO,
+      SELECTORS.LIQUIDACION.FORM.IBC,
+      SELECTORS.LIQUIDACION.FORM.INGRESO_BASE,
+    ];
+
+    let formLoaded = false;
+    for (const selector of formSelectors) {
+      try {
+        await page.waitForSelector(selector, { timeout: 5000 });
+        formLoaded = true;
+        logger.info('Liquidation form loaded', { selector });
+        break;
+      } catch (e) {
+        // Continue to next selector
+      }
+    }
+
+    if (!formLoaded) {
+      logger.warn('Could not detect liquidation form with known selectors');
+      await browserManager.takeScreenshot(page, 'liquidacion-form-not-detected');
+      // Continue anyway - form might be there with different selectors
+    }
+
+    await browserManager.takeScreenshot(page, 'liquidacion-form-ready');
+    logger.info('✅ Liquidation form ready');
+  } catch (error) {
+    logger.error('Error selecting liquidation type', { error });
+    await browserManager.takeScreenshot(page, 'liquidacion-tipo-error');
+    throw new BotError('Failed to select liquidation type');
+  }
+}
 
 /**
  * Liquidation Bot Class
@@ -114,74 +408,73 @@ export class EnlaceLiquidacionBot {
 
   /**
    * Navigate to Liquidación section
+   * Updated to use new navigation helpers
    */
   private async navigateToLiquidacion(page: Page): Promise<void> {
     try {
-      // Try clicking menu item first
+      // Try clicking menu item first (for in-app navigation)
+      const menuLiquidarExists = await elementExists(page, SELECTORS.LIQUIDACION.MENU_LIQUIDAR);
       const menuItemExists = await elementExists(page, SELECTORS.LIQUIDACION.MENU_ITEM);
       const menuItemAltExists = await elementExists(page, SELECTORS.LIQUIDACION.MENU_ITEM_ALT);
+      const menuGeneradorExists = await elementExists(page, SELECTORS.LIQUIDACION.MENU_GENERADOR);
 
-      if (menuItemExists) {
+      if (menuLiquidarExists) {
+        logger.debug('Clicking "Liquidar PILA" menu item');
+        await waitAndClick(page, SELECTORS.LIQUIDACION.MENU_LIQUIDAR);
+        await sleep(2000);
+      } else if (menuGeneradorExists) {
+        logger.debug('Clicking "Generador de planillas" menu item');
+        await waitAndClick(page, SELECTORS.LIQUIDACION.MENU_GENERADOR);
+        await sleep(2000);
+      } else if (menuItemExists) {
+        logger.debug('Clicking liquidation menu item (primary)');
         await waitAndClick(page, SELECTORS.LIQUIDACION.MENU_ITEM);
-        await sleep(1000);
+        await sleep(2000);
       } else if (menuItemAltExists) {
+        logger.debug('Clicking liquidation menu item (alternative)');
         await waitAndClick(page, SELECTORS.LIQUIDACION.MENU_ITEM_ALT);
-        await sleep(1000);
+        await sleep(2000);
       } else {
         // Navigate directly to URL
-        logger.debug('Menu item not found, navigating to URL');
-        await page.goto(URL_PATTERNS.LIQUIDACION, {
+        logger.debug('Menu item not found, navigating directly to URL');
+        const baseUrl = process.env.ENLACE_BASE_URL || URL_PATTERNS.BASE;
+        const liquidacionUrl = `${baseUrl}/generador-planillas/#/`;
+
+        await page.goto(liquidacionUrl, {
           waitUntil: 'networkidle2',
           timeout: 30000,
         });
+        await sleep(2000);
       }
 
       await randomDelay(1000, 2000);
       await browserManager.takeScreenshot(page, 'liquidacion-section');
+
+      logger.debug('Successfully navigated to liquidación section');
     } catch (error) {
+      logger.error('Failed to navigate to Liquidación section', { error });
+      await browserManager.takeScreenshot(page, 'liquidacion-nav-error');
       throw new BotError('Failed to navigate to Liquidación section');
     }
   }
 
   /**
    * Search for user and select them for liquidation
+   * Updated to use new selectAportante helper function
    */
   private async searchAndSelectUser(page: Page, numeroDocumento: string): Promise<void> {
     try {
       await browserManager.takeScreenshot(page, 'before-user-search');
+      logger.debug('Selecting user for liquidation', { documento: numeroDocumento });
 
-      // Wait for search input
-      const searchInputExists = await elementExists(page, SELECTORS.LIQUIDACION.BUSCAR_APORTANTE);
-      if (!searchInputExists) {
-        logger.warn('Search input not found, user might already be selected');
-        return;
-      }
+      // Use the new selectAportante helper that handles multiple layouts
+      await selectAportante(page, numeroDocumento);
 
-      // Fill search input
-      logger.debug('Filling search input', { documento: numeroDocumento });
-      await waitAndType(page, SELECTORS.LIQUIDACION.BUSCAR_APORTANTE, numeroDocumento, {
-        clear: true,
-        delay: 100,
-      });
-      await randomDelay(500, 1000);
-
-      // Press Enter or wait for results
-      await page.keyboard.press('Enter');
-      await sleep(2000);
-
-      await browserManager.takeScreenshot(page, 'user-search-results');
-
-      // Click select button if it exists
-      const selectButtonExists = await elementExists(page, SELECTORS.LIQUIDACION.SELECCIONAR_APORTANTE);
-      if (selectButtonExists) {
-        logger.debug('Selecting user');
-        await waitAndClick(page, SELECTORS.LIQUIDACION.SELECCIONAR_APORTANTE);
-        await sleep(1000);
-        await browserManager.takeScreenshot(page, 'user-selected');
-      } else {
-        logger.debug('Select button not found, proceeding (user might be auto-selected)');
-      }
+      await browserManager.takeScreenshot(page, 'user-selected');
+      logger.debug('✅ User selected successfully');
     } catch (error) {
+      logger.error('Failed to search and select user', { error, documento: numeroDocumento });
+      await browserManager.takeScreenshot(page, 'user-search-error');
       throw new BotError('Failed to search and select user');
     }
   }
@@ -714,4 +1007,60 @@ export async function liquidarPilaEnlace(
   navigateToPSE: boolean = false
 ): Promise<BotResponse<EnlaceLiquidacionResult>> {
   return enlaceLiquidacion.liquidarPila(numeroDocumento, pilaData, navigateToPSE);
+}
+
+/**
+ * Complete liquidation flow using new navigation functions
+ * This is an alternative approach that uses the helper functions directly
+ *
+ * @param numeroDocumento - User document number
+ * @param pilaData - PILA calculation data
+ * @param navigateToPSE - Whether to navigate to PSE page
+ * @returns Liquidation result
+ */
+export async function liquidarPilaCompleto(
+  numeroDocumento: string,
+  pilaData: PilaData,
+  navigateToPSE: boolean = false
+): Promise<BotResponse<EnlaceLiquidacionResult>> {
+  const startTime = Date.now();
+
+  logger.info('Starting complete PILA liquidation flow', {
+    numeroDocumento,
+    periodo: pilaData.periodo,
+    total: pilaData.total,
+  });
+
+  try {
+    // Step 1: Navigate to liquidation and select user
+    logger.info('Step 1: Navigating to liquidation');
+    const context = await navegarALiquidacion(numeroDocumento);
+
+    // Step 2: Select liquidation type if needed
+    logger.info('Step 2: Selecting liquidation type');
+    await seleccionarTipoLiquidacion(context);
+
+    // Step 3: Use the bot class to complete the rest
+    logger.info('Step 3: Completing liquidation with bot');
+    const result = await enlaceLiquidacion.liquidarPila(numeroDocumento, pilaData, navigateToPSE);
+
+    logger.info('✅ Complete liquidation flow finished successfully', {
+      numeroDocumento,
+      duration: Date.now() - startTime,
+    });
+
+    return result;
+  } catch (error) {
+    logger.error('❌ Complete liquidation flow failed', {
+      error,
+      numeroDocumento,
+      duration: Date.now() - startTime,
+    });
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error in complete liquidation',
+      duration: Date.now() - startTime,
+    };
+  }
 }

@@ -1,0 +1,174 @@
+/**
+ * ULE - Prisma Schema Actualizado
+ *
+ * UBICACIÓN EN TU PROYECTO ULE:
+ * prisma/schema.prisma
+ *
+ * INSTRUCCIONES:
+ * 1. Copia el modelo Payment y el enum PaymentStatus a tu schema.prisma
+ * 2. Ejecuta: npx prisma migrate dev --name add_payment_wompi_rpa
+ * 3. Ejecuta: npx prisma generate
+ */
+
+// Tu datasource y generator existentes
+// datasource db {
+//   provider = "postgresql"
+//   url      = env("DATABASE_URL")
+// }
+//
+// generator client {
+//   provider = "prisma-client-js"
+// }
+
+// ============================================================================
+// MODELO PAYMENT - NUEVO
+// ============================================================================
+
+model Payment {
+  id                String        @id @default(cuid())
+  userId            String
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Identificación del pago
+  reference         String        @unique  // Referencia única para Wompi (ej: "PILA-user123-1234567890")
+  amount            Int                    // Monto en centavos (COP) - Wompi usa centavos
+
+  // Estado del pago
+  status            PaymentStatus @default(PENDING)
+
+  // Integración con Wompi
+  wompiTransactionId String?               // ID de transacción de Wompi (ej: "12345-1234-...")
+  wompiCheckoutId    String?               // ID de checkout de Wompi (opcional)
+
+  // Integración con RPA Service
+  rpaTaskId         String?                // ID de tarea en RPA Service (ej: "task-uuid")
+
+  // Datos de PILA (almacenados como JSON)
+  pilaData          Json                   // Estructura:
+  // {
+  //   periodo: "2026-02",
+  //   ingresoBase: 1500000,
+  //   ibc: 1500000,
+  //   diasCotizados: 30,
+  //   salud: 187500,
+  //   pension: 240000,
+  //   arl: 7830,
+  //   nivelRiesgoARL: "I",
+  //   total: 435330
+  // }
+
+  // Timestamps
+  createdAt         DateTime      @default(now())   // Cuando se creó el pago
+  confirmedAt       DateTime?                       // Cuando Wompi confirmó el pago
+  updatedAt         DateTime      @updatedAt        // Última actualización
+
+  // Índices para mejorar rendimiento de consultas
+  @@index([userId])
+  @@index([reference])
+  @@index([status])
+  @@index([rpaTaskId])
+}
+
+// ============================================================================
+// ENUM PAYMENT STATUS - NUEVO
+// ============================================================================
+
+enum PaymentStatus {
+  PENDING    // Pago creado, esperando confirmación de Wompi
+  CONFIRMED  // Wompi confirmó el pago exitosamente
+  FAILED     // Pago falló (error de banco, fondos insuficientes, etc.)
+  REFUNDED   // Pago reembolsado al usuario
+  CANCELLED  // Pago cancelado por el usuario o sistema
+}
+
+// ============================================================================
+// MODELO USER - REFERENCIA (ya debe existir en tu schema)
+// ============================================================================
+
+// Este es solo de referencia - NO copies este modelo si ya lo tienes
+// Solo asegúrate de que Payment tenga la relación correcta con User
+
+// model User {
+//   id          String    @id @default(cuid())
+//   email       String    @unique
+//   name        String?
+//   // ... tus otros campos
+//
+//   // Relación con pagos (AGREGAR ESTA LÍNEA)
+//   payments    Payment[]
+//
+//   createdAt   DateTime  @default(now())
+//   updatedAt   DateTime  @updatedAt
+// }
+
+// ============================================================================
+// EJEMPLO DE CREACIÓN DE PAGO
+// ============================================================================
+
+/*
+// En tu código de Next.js cuando el usuario inicia un pago:
+
+const payment = await prisma.payment.create({
+  data: {
+    userId: session.user.id,
+    reference: `PILA-${session.user.id}-${Date.now()}`,
+    amount: 435330, // Total en centavos (salud + pensión + arl)
+    status: 'PENDING',
+    pilaData: {
+      periodo: '2026-02',
+      ingresoBase: 1500000,
+      ibc: 1500000,
+      diasCotizados: 30,
+      salud: 187500,    // 12.5% del IBC
+      pension: 240000,  // 16% del IBC
+      arl: 7830,        // 0.522% del IBC (nivel I)
+      nivelRiesgoARL: 'I',
+      total: 435330,
+    },
+  },
+});
+
+// Después redirigir a Wompi con payment.reference
+*/
+
+// ============================================================================
+// EJEMPLO DE CONSULTAS
+// ============================================================================
+
+/*
+// Obtener todos los pagos confirmados de un usuario
+const confirmedPayments = await prisma.payment.findMany({
+  where: {
+    userId: session.user.id,
+    status: 'CONFIRMED',
+  },
+  orderBy: {
+    confirmedAt: 'desc',
+  },
+});
+
+// Obtener pago por referencia (usado en webhook)
+const payment = await prisma.payment.findUnique({
+  where: { reference: 'PILA-user123-1234567890' },
+  include: { user: true },
+});
+
+// Actualizar estado a confirmado (usado en webhook)
+await prisma.payment.update({
+  where: { id: payment.id },
+  data: {
+    status: 'CONFIRMED',
+    confirmedAt: new Date(),
+    wompiTransactionId: 'wompi-tx-123',
+    rpaTaskId: 'task-uuid',
+  },
+});
+
+// Obtener pagos pendientes de RPA
+const pendingRPA = await prisma.payment.findMany({
+  where: {
+    status: 'CONFIRMED',
+    rpaTaskId: { not: null },
+  },
+});
+*/

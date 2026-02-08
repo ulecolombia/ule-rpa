@@ -2,7 +2,7 @@
 
 ## 2026-02-08
 
-### ✅ Fase 4: Bot de Descarga de Comprobantes - EN PROGRESO
+### ✅ Fase 4: Bot de Descarga de Comprobantes - COMPLETADA
 
 #### Subfase 4.1: Bot de Detección de Pagos
 **Commits**: `ffb7b15`, `e0133ad`
@@ -153,6 +153,172 @@ if (result.success) {
 
 **Archivos**:
 - `src/bots/enlace/comprobante.bot.ts` (+319 líneas)
+
+---
+
+#### Subfase 4.3: Servicio de Almacenamiento
+**Commits**: `6d9d408`
+
+**Implementado**:
+- ✅ Clase `StorageUploader` - Multi-backend storage service (356 líneas)
+- ✅ Soporte para 3 backends: local, Vercel Blob, AWS S3
+- ✅ Selección automática vía `STORAGE_TYPE` env var
+- ✅ Path estructurado: `comprobantes/{userId}/pila/{año}/{mes}/`
+- ✅ Metadata attachment (userId, planilla, periodo, valor, fecha)
+- ✅ Public URL generation para cada backend
+- ✅ Cleanup de archivos locales post-upload
+- ✅ Validación completa (file exists, size, format)
+- ✅ Error handling exhaustivo
+
+**Backends Soportados**:
+
+1. **Local Storage** (default):
+   - No requiere dependencias adicionales
+   - Copia archivo a `STORAGE_PATH`
+   - Retorna: `{STORAGE_BASE_URL}/{remotePath}`
+   - Perfecto para desarrollo
+
+2. **Vercel Blob** (requiere: `@vercel/blob`):
+   - CDN automático global
+   - Requiere: `BLOB_READ_WRITE_TOKEN`
+   - Access público por defecto
+   - Escalabilidad automática
+
+3. **AWS S3** (requiere: `@aws-sdk/client-s3`):
+   - Storage escalable
+   - Metadata adjunta al objeto
+   - Requiere: AWS credentials + bucket
+   - Compatible con CloudFront
+
+**Interfaces**:
+```typescript
+interface UploadResult {
+  success: boolean
+  url?: string           // URL pública
+  publicId?: string      // Path remoto/ID
+  error?: string
+}
+
+interface ComprobanteMetadata {
+  userId: string
+  numeroPlanilla: string
+  periodo: string        // YYYY-MM
+  valor: number
+  fechaPago: Date
+}
+```
+
+**Helper Function**:
+```typescript
+await uploadComprobanteToStorage(
+  localPath,
+  metadata,
+  true  // cleanup local file
+);
+```
+
+**Variables de Entorno**:
+```bash
+STORAGE_TYPE=local  # o 'vercel-blob' o 's3'
+STORAGE_PATH=./uploads
+STORAGE_BASE_URL=http://localhost:3001/files
+
+# Vercel Blob
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_xxxxx
+
+# AWS S3
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=xxxx...
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=ule-rpa-files
+```
+
+**Archivos**:
+- `src/storage/uploader.ts` (+356 líneas)
+- `.env.example` (actualizado)
+
+---
+
+#### Subfase 4.4: Worker de Comprobantes + Cron Job
+**Commits**: `c664fd3`
+
+**PARTE 1: Worker Handler**
+
+**Archivo**: `src/orchestrator/worker.ts`
+
+**Implementado**:
+- ✅ Reemplazo completo del caso `COMPROBANTE` (256 líneas)
+- ✅ Integración de verificarEstadoPlanilla + descargarComprobante + uploadComprobanteToStorage
+- ✅ Flujo completo de 6 pasos
+- ✅ Logging detallado en cada paso (6+ logs)
+- ✅ Error handling robusto
+- ✅ Actualización automática de estado de planilla
+
+**Flujo del Worker COMPROBANTE** (6 pasos):
+1. **Fetch Planilla**: Obtener datos con relación enlaceUser
+2. **Verificar Estado**: Usar `verificarEstadoPlanilla()`
+   - Si NO pagada → Actualizar estado si cambió, throw error
+   - Si PAGADA → Continuar
+3. **Descargar PDF**: Usar `descargarComprobante()` para obtener archivo local
+4. **Upload a Storage**: Usar `uploadComprobanteToStorage()` con metadata
+5. **Guardar en DB**: Crear registro `Comprobante` con fileUrl
+6. **Actualizar Planilla**: Set `estadoPago = 'PAGADA'`, `fechaPago`
+7. **Cleanup**: Eliminar archivo local
+
+**Return Data**:
+```typescript
+{
+  comprobanteId: string
+  fileUrl: string
+  fileName: string
+  fileSize: number
+  estadoPago: 'PAGADA'
+}
+```
+
+**PARTE 2: Automated Scheduler**
+
+**Archivo**: `src/orchestrator/scheduler.ts`
+
+**Implementado**:
+- ✅ Nueva función: `checkPaidPlanillasTask()` (100+ líneas)
+- ✅ Cron schedule: Cada 2 horas (`0 */2 * * *`)
+- ✅ Timezone: America/Bogota
+- ✅ Batch processing: Máximo 20 planillas por corrida
+- ✅ Rate limiting: 1 tarea/segundo
+- ✅ Validaciones anti-duplicado
+
+**Lógica del Scheduler**:
+1. Buscar planillas pendientes:
+   - `estadoPago = 'PENDIENTE'`
+   - Liquidadas hace > 1 hora (dar tiempo para pago)
+   - No vencidas (`fechaLimite >= now`)
+   - Sin comprobante existente
+   - Límite: 20 planillas/corrida
+
+2. Para cada planilla:
+   - Verificar si ya tiene comprobante → skip
+   - Verificar si tarea COMPROBANTE ya existe → skip
+   - Crear tarea COMPROBANTE con priority 4 (media-baja)
+   - Esperar 1 segundo antes de siguiente tarea
+
+3. Logging de resultados:
+   - Tasks created
+   - Already paid (con comprobante)
+   - Errors
+
+**Beneficios**:
+- ✅ Descarga automática cuando planilla se paga
+- ✅ Sin intervención manual
+- ✅ Prevención de duplicados
+- ✅ Graceful error handling
+- ✅ No sobrecarga del sistema
+
+**Scheduler Count**: Actualizado de 7 a 8 jobs programados
+
+**Archivos**:
+- `src/orchestrator/worker.ts` (+256 líneas netas)
+- `src/orchestrator/scheduler.ts` (+100 líneas)
 
 ---
 

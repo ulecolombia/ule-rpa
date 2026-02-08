@@ -45,6 +45,7 @@ export interface TaskInput {
   userData?: UserData;
   pilaData?: PilaData;
   paymentId?: string;
+  numeroPlanilla?: string; // Required for COMPROBANTE tasks
   priority?: number;
 }
 

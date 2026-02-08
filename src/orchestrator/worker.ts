@@ -8,15 +8,9 @@ import { PrismaClient } from '@prisma/client';
 import { redisConnection, moveToDeadLetter } from './queue.config';
 import { logger, createChildLogger } from '../utils/logger';
 import { TaskInput, TaskResult } from '../types';
-import { createBrowser, createPage, closeBrowser } from '../bots/utils/browser';
-import { authenticateEnlace, logoutEnlace } from '../bots/enlace/auth.bot';
-import { registrarUsuario } from '../bots/enlace/registro.bot'; // UPDATED: New function
+import { registrarUsuario } from '../bots/enlace/registro.bot';
 import { liquidarPilaEnlace } from '../bots/enlace/liquidacion.bot';
 import { descargarComprobanteEnlace } from '../bots/enlace/comprobante.bot';
-import {
-  LiquidacionPayload,
-  ComprobantePayload,
-} from '../types/task.types';
 import { startScheduler, stopScheduler } from './scheduler';
 
 const prisma = new PrismaClient();
@@ -91,7 +85,6 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
     throw error;
   }
 
-  let browser;
   let result: TaskResult = {
     success: false,
     data: undefined,
@@ -99,23 +92,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
   };
 
   try {
-    // Create browser instance
-    jobLogger.debug('Launching browser');
-    browser = await createBrowser();
-    const page = await createPage(browser);
-    await logTaskProgress(task.id, 'DEBUG', 'Browser launched successfully');
-
-    // Authenticate to Enlace
-    jobLogger.info('Authenticating to Enlace');
-    const authResult = await authenticateEnlace(page);
-
-    if (!authResult.success) {
-      throw new Error(`Authentication failed: ${authResult.error}`);
-    }
-
-    await logTaskProgress(task.id, 'INFO', 'Authenticated to Enlace successfully');
-
-    // Execute bot based on task type
+    // Execute bot based on task type (each bot handles its own browser/auth)
     jobLogger.info(`Executing ${job.data.type} bot`);
 
     switch (job.data.type) {
@@ -201,104 +178,153 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
       }
 
       case 'LIQUIDACION': {
-        if (!job.data.pilaData) {
+        const { pilaData, uleUserId, paymentId } = job.data;
+
+        if (!pilaData) {
           throw new Error('pilaData is required for LIQUIDACION task');
         }
 
-        const liquidacionPayload: LiquidacionPayload = {
-          numeroDocumento: job.data.userData?.numeroDocumento || '',
-          periodo: job.data.pilaData.periodo,
-          ingresoBase: job.data.pilaData.ingresoBase,
-          ibc: job.data.pilaData.ibc,
-          salud: job.data.pilaData.salud,
-          pension: job.data.pilaData.pension,
-          arl: job.data.pilaData.arl,
-          total: job.data.pilaData.total,
-          paymentId: job.data.paymentId || '',
-        };
-
-        const liquidacionResult = await liquidarPilaEnlace(page, liquidacionPayload);
-
-        if (liquidacionResult.success && liquidacionResult.data) {
-          // Create PilaPlanilla record
-          const enlaceUser = await prisma.enlaceUser.findUnique({
-            where: { uleUserId: job.data.uleUserId },
-          });
-
-          if (enlaceUser) {
-            const planilla = await prisma.pilaPlanilla.create({
-              data: {
-                uleUserId: job.data.uleUserId,
-                enlaceUserId: enlaceUser.id,
-                taskId: task.id,
-                paymentId: job.data.paymentId || '',
-                numeroPlanilla: liquidacionResult.data.numeroPlanilla!,
-                periodo: job.data.pilaData.periodo,
-                ingresoBase: job.data.pilaData.ingresoBase,
-                ibc: job.data.pilaData.ibc,
-                salud: job.data.pilaData.salud,
-                pension: job.data.pilaData.pension,
-                arl: job.data.pilaData.arl,
-                total: job.data.pilaData.total,
-                estadoPago: 'PENDIENTE',
-                fechaLimite: liquidacionResult.data.fechaLimite || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-              },
-            });
-
-            await logTaskProgress(task.id, 'INFO', 'PILA planilla created', {
-              numeroPlanilla: planilla.numeroPlanilla,
-            });
-          }
+        if (!job.data.userData?.numeroDocumento) {
+          throw new Error('numeroDocumento is required for LIQUIDACION task');
         }
 
-        result = {
-          success: liquidacionResult.success,
-          data: liquidacionResult.data,
-          error: liquidacionResult.error,
-          duration: liquidacionResult.duration || 0,
-        };
+        const numeroDocumento = job.data.userData.numeroDocumento;
+
+        // Log de inicio
+        await logTaskProgress(task.id, 'INFO', 'Starting PILA liquidation', {
+          documento: numeroDocumento,
+          periodo: pilaData.periodo,
+          total: pilaData.total,
+        });
+
+        // Ejecutar bot de liquidación
+        const liquidacionResult = await liquidarPilaEnlace(numeroDocumento, pilaData);
+
+        if (!liquidacionResult.success) {
+          throw new Error(liquidacionResult.error || 'Liquidation failed');
+        }
+
+        if (liquidacionResult.data) {
+          // Find EnlaceUser
+          const enlaceUser = await prisma.enlaceUser.findUnique({
+            where: { uleUserId },
+          });
+
+          if (!enlaceUser) {
+            throw new Error('EnlaceUser not found. User must be registered first.');
+          }
+
+          // Create PilaPlanilla record
+          const planilla = await prisma.pilaPlanilla.create({
+            data: {
+              uleUserId,
+              enlaceUserId: enlaceUser.id,
+              taskId: task.id,
+              paymentId: paymentId || '',
+              numeroPlanilla: liquidacionResult.data.numeroPlanilla!,
+              periodo: pilaData.periodo,
+              ingresoBase: pilaData.ingresoBase,
+              ibc: pilaData.ibc,
+              salud: pilaData.salud,
+              pension: pilaData.pension,
+              arl: pilaData.arl,
+              total: pilaData.total,
+              estadoPago: 'PENDIENTE',
+              fechaLimite: liquidacionResult.data.fechaLimite || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            },
+          });
+
+          // Log de éxito
+          await logTaskProgress(task.id, 'INFO', 'PILA planilla created successfully', {
+            numeroPlanilla: planilla.numeroPlanilla,
+            total: planilla.total,
+            fechaLimite: planilla.fechaLimite,
+          });
+
+          result = {
+            success: true,
+            data: {
+              planillaId: planilla.id,
+              numeroPlanilla: planilla.numeroPlanilla,
+              total: planilla.total,
+              fechaLimite: planilla.fechaLimite,
+            },
+            duration: liquidacionResult.duration || 0,
+          };
+        } else {
+          throw new Error('Liquidation completed but no data returned');
+        }
+
         break;
       }
 
       case 'COMPROBANTE': {
-        const comprobantePayload: ComprobantePayload = {
-          numeroPlanilla: job.data.pilaData?.periodo || '', // Should be passed properly
-          numeroDocumento: job.data.userData?.numeroDocumento || '',
-          periodo: job.data.pilaData?.periodo || '',
-        };
 
-        const comprobanteResult = await descargarComprobanteEnlace(page, comprobantePayload);
-
-        if (comprobanteResult.success && comprobanteResult.data) {
-          // Find planilla and create Comprobante
-          const planilla = await prisma.pilaPlanilla.findUnique({
-            where: { numeroPlanilla: comprobantePayload.numeroPlanilla },
-          });
-
-          if (planilla) {
-            await prisma.comprobante.create({
-              data: {
-                planillaId: planilla.id,
-                uleUserId: planilla.uleUserId,
-                fileName: comprobanteResult.data.fileName!,
-                filePath: comprobanteResult.data.filePath!,
-                fileUrl: comprobanteResult.data.fileUrl,
-                fileSize: comprobanteResult.data.fileSize!,
-              },
-            });
-
-            await logTaskProgress(task.id, 'INFO', 'Comprobante downloaded and saved', {
-              fileName: comprobanteResult.data.fileName,
-            });
-          }
+        // COMPROBANTE requires numeroPlanilla - should be passed in job.data
+        if (!job.data.numeroPlanilla) {
+          throw new Error('numeroPlanilla is required for COMPROBANTE task');
         }
 
-        result = {
-          success: comprobanteResult.success,
-          data: comprobanteResult.data,
-          error: comprobanteResult.error,
-          duration: comprobanteResult.duration || 0,
-        };
+        const numeroPlanilla = job.data.numeroPlanilla;
+        const numeroDocumento = job.data.userData?.numeroDocumento;
+        const periodo = job.data.pilaData?.periodo;
+
+        // Log de inicio
+        await logTaskProgress(task.id, 'INFO', 'Starting comprobante download', {
+          numeroPlanilla,
+          documento: numeroDocumento,
+          periodo,
+        });
+
+        // Ejecutar bot de descarga
+        const comprobanteResult = await descargarComprobanteEnlace(numeroPlanilla, numeroDocumento, periodo);
+
+        if (!comprobanteResult.success) {
+          throw new Error(comprobanteResult.error || 'Comprobante download failed');
+        }
+
+        if (comprobanteResult.data) {
+          // Find planilla
+          const planilla = await prisma.pilaPlanilla.findUnique({
+            where: { numeroPlanilla },
+          });
+
+          if (!planilla) {
+            throw new Error(`Planilla ${numeroPlanilla} not found in database`);
+          }
+
+          // Create Comprobante record
+          const comprobante = await prisma.comprobante.create({
+            data: {
+              planillaId: planilla.id,
+              uleUserId: planilla.uleUserId,
+              fileName: comprobanteResult.data.fileName!,
+              filePath: comprobanteResult.data.filePath!,
+              fileSize: comprobanteResult.data.fileSize!,
+            },
+          });
+
+          // Log de éxito
+          await logTaskProgress(task.id, 'INFO', 'Comprobante downloaded and saved', {
+            fileName: comprobante.fileName,
+            filePath: comprobante.filePath,
+            fileSize: comprobante.fileSize,
+          });
+
+          result = {
+            success: true,
+            data: {
+              comprobanteId: comprobante.id,
+              fileName: comprobante.fileName,
+              filePath: comprobante.filePath,
+              fileSize: comprobante.fileSize,
+            },
+            duration: comprobanteResult.duration || 0,
+          };
+        } else {
+          throw new Error('Comprobante download completed but no data returned');
+        }
+
         break;
       }
 
@@ -343,22 +369,41 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
         await logTaskProgress(task.id, 'INFO', 'Registration completed, starting liquidation');
 
         // Phase 2: Liquidation
-        const liquidacionPayload: LiquidacionPayload = {
-          numeroDocumento: job.data.userData.numeroDocumento,
-          periodo: job.data.pilaData.periodo,
-          ingresoBase: job.data.pilaData.ingresoBase,
-          ibc: job.data.pilaData.ibc,
-          salud: job.data.pilaData.salud,
-          pension: job.data.pilaData.pension,
-          arl: job.data.pilaData.arl,
-          total: job.data.pilaData.total,
-          paymentId: job.data.paymentId || '',
-        };
-
-        const liquidacionResult = await liquidarPilaEnlace(page, liquidacionPayload);
+        const liquidacionResult = await liquidarPilaEnlace(
+          job.data.userData.numeroDocumento,
+          job.data.pilaData
+        );
 
         if (!liquidacionResult.success) {
           throw new Error(`Liquidation failed: ${liquidacionResult.error}`);
+        }
+
+        // Save planilla if liquidation succeeded
+        if (liquidacionResult.data) {
+          const enlaceUser = await prisma.enlaceUser.findUnique({
+            where: { uleUserId: job.data.uleUserId },
+          });
+
+          if (enlaceUser) {
+            await prisma.pilaPlanilla.create({
+              data: {
+                uleUserId: job.data.uleUserId,
+                enlaceUserId: enlaceUser.id,
+                taskId: task.id,
+                paymentId: job.data.paymentId || '',
+                numeroPlanilla: liquidacionResult.data.numeroPlanilla!,
+                periodo: job.data.pilaData.periodo,
+                ingresoBase: job.data.pilaData.ingresoBase,
+                ibc: job.data.pilaData.ibc,
+                salud: job.data.pilaData.salud,
+                pension: job.data.pilaData.pension,
+                arl: job.data.pilaData.arl,
+                total: job.data.pilaData.total,
+                estadoPago: 'PENDIENTE',
+                fechaLimite: liquidacionResult.data.fechaLimite || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+              },
+            });
+          }
         }
 
         await logTaskProgress(task.id, 'INFO', 'FULL_FLOW completed successfully');
@@ -381,9 +426,6 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
       default:
         throw new Error(`Unknown task type: ${job.data.type}`);
     }
-
-    // Logout from Enlace
-    await logoutEnlace(page);
 
     if (!result.success) {
       throw new Error(result.error || 'Task execution failed');
@@ -461,11 +503,6 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
     }
 
     throw error; // Re-throw to let BullMQ handle retries
-  } finally {
-    // Close browser
-    if (browser) {
-      await closeBrowser(browser);
-    }
   }
 }
 
@@ -478,10 +515,6 @@ export const taskWorker = new Worker<TaskInput>('ule-rpa-tasks', processTask, {
   limiter: {
     max: 10, // Max 10 jobs
     duration: 60000, // per minute
-  },
-  settings: {
-    stalledInterval: 30000, // Check for stalled jobs every 30s
-    maxStalledCount: 2, // Max stalled attempts
   },
 });
 

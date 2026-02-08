@@ -9,7 +9,7 @@ import { redisConnection, moveToDeadLetter } from './queue.config';
 import { logger, createChildLogger } from '../utils/logger';
 import { TaskInput, TaskResult } from '../types';
 import { registrarUsuario } from '../bots/enlace/registro.bot';
-import { liquidarPilaEnlace } from '../bots/enlace/liquidacion.bot';
+import { liquidarPilaConConfirmacion } from '../bots/enlace/liquidacion.bot';
 import { descargarComprobanteEnlace } from '../bots/enlace/comprobante.bot';
 import { startScheduler, stopScheduler } from './scheduler';
 
@@ -178,82 +178,98 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
       }
 
       case 'LIQUIDACION': {
-        const { pilaData, uleUserId, paymentId } = job.data;
+        const { uleUserId, pilaData, paymentId } = job.data;
 
         if (!pilaData) {
           throw new Error('pilaData is required for LIQUIDACION task');
         }
 
-        if (!job.data.userData?.numeroDocumento) {
-          throw new Error('numeroDocumento is required for LIQUIDACION task');
-        }
+        // Obtener usuario de Enlace
+        const enlaceUser = await prisma.enlaceUser.findUnique({
+          where: { uleUserId },
+        });
 
-        const numeroDocumento = job.data.userData.numeroDocumento;
+        if (!enlaceUser || enlaceUser.enlaceStatus !== 'REGISTERED') {
+          throw new Error('User not registered in Enlace');
+        }
 
         // Log de inicio
         await logTaskProgress(task.id, 'INFO', 'Starting PILA liquidation', {
-          documento: numeroDocumento,
+          documento: enlaceUser.numeroDocumento,
           periodo: pilaData.periodo,
           total: pilaData.total,
         });
 
-        // Ejecutar bot de liquidación
-        const liquidacionResult = await liquidarPilaEnlace(numeroDocumento, pilaData);
+        // Ejecutar liquidación con confirmación completa
+        const liquidacionResult = await liquidarPilaConConfirmacion(
+          enlaceUser.numeroDocumento,
+          pilaData
+        );
 
         if (!liquidacionResult.success) {
           throw new Error(liquidacionResult.error || 'Liquidation failed');
         }
 
-        if (liquidacionResult.data) {
-          // Find EnlaceUser
-          const enlaceUser = await prisma.enlaceUser.findUnique({
-            where: { uleUserId },
-          });
+        // Guardar planilla en DB
+        const planilla = await prisma.pilaPlanilla.create({
+          data: {
+            uleUserId,
+            enlaceUserId: enlaceUser.id,
+            taskId: task.id,
+            paymentId: paymentId || '',
 
-          if (!enlaceUser) {
-            throw new Error('EnlaceUser not found. User must be registered first.');
-          }
+            numeroPlanilla: liquidacionResult.numeroPlanilla!,
+            periodo: pilaData.periodo,
 
-          // Create PilaPlanilla record
-          const planilla = await prisma.pilaPlanilla.create({
-            data: {
-              uleUserId,
-              enlaceUserId: enlaceUser.id,
-              taskId: task.id,
-              paymentId: paymentId || '',
-              numeroPlanilla: liquidacionResult.data.numeroPlanilla!,
-              periodo: pilaData.periodo,
-              ingresoBase: pilaData.ingresoBase,
-              ibc: pilaData.ibc,
-              salud: pilaData.salud,
-              pension: pilaData.pension,
-              arl: pilaData.arl,
-              total: pilaData.total,
-              estadoPago: 'PENDIENTE',
-              fechaLimite: liquidacionResult.data.fechaLimite || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-            },
-          });
+            ingresoBase: pilaData.ingresoBase,
+            ibc: pilaData.ibc,
+            salud: pilaData.salud,
+            pension: pilaData.pension,
+            arl: pilaData.arl,
+            total: pilaData.total,
 
-          // Log de éxito
-          await logTaskProgress(task.id, 'INFO', 'PILA planilla created successfully', {
-            numeroPlanilla: planilla.numeroPlanilla,
-            total: planilla.total,
-            fechaLimite: planilla.fechaLimite,
-          });
+            estadoPago: 'PENDIENTE',
+            fechaLiquidacion: new Date(),
+            fechaLimite:
+              liquidacionResult.fechaLimite || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          },
+        });
 
-          result = {
-            success: true,
-            data: {
+        // Actualizar tarea a AWAITING (esperando pago PSE)
+        await prisma.task.update({
+          where: { id: task.id },
+          data: {
+            status: 'AWAITING',
+            resultData: {
+              numeroPlanilla: liquidacionResult.numeroPlanilla,
               planillaId: planilla.id,
-              numeroPlanilla: planilla.numeroPlanilla,
-              total: planilla.total,
-              fechaLimite: planilla.fechaLimite,
-            },
-            duration: liquidacionResult.duration || 0,
-          };
-        } else {
-          throw new Error('Liquidation completed but no data returned');
+              urlPSE: liquidacionResult.urlPSE,
+            } as any,
+          },
+        });
+
+        // Log de éxito
+        await logTaskProgress(task.id, 'INFO', 'PILA liquidated successfully - awaiting PSE payment', {
+          numeroPlanilla: liquidacionResult.numeroPlanilla,
+          planillaId: planilla.id,
+        });
+
+        // Log warnings if any
+        if (liquidacionResult.warnings && liquidacionResult.warnings.length > 0) {
+          await logTaskProgress(task.id, 'WARN', 'Liquidation completed with warnings', {
+            warnings: liquidacionResult.warnings,
+          });
         }
+
+        result = {
+          success: true,
+          data: {
+            numeroPlanilla: liquidacionResult.numeroPlanilla,
+            planillaId: planilla.id,
+            estadoPago: 'PENDIENTE',
+          },
+          duration: Date.now() - startTime,
+        };
 
         break;
       }
@@ -368,8 +384,8 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
 
         await logTaskProgress(task.id, 'INFO', 'Registration completed, starting liquidation');
 
-        // Phase 2: Liquidation
-        const liquidacionResult = await liquidarPilaEnlace(
+        // Phase 2: Liquidation (using new complete flow)
+        const liquidacionResult = await liquidarPilaConConfirmacion(
           job.data.userData.numeroDocumento,
           job.data.pilaData
         );
@@ -379,31 +395,31 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
         }
 
         // Save planilla if liquidation succeeded
-        if (liquidacionResult.data) {
-          const enlaceUser = await prisma.enlaceUser.findUnique({
-            where: { uleUserId: job.data.uleUserId },
-          });
+        const enlaceUser = await prisma.enlaceUser.findUnique({
+          where: { uleUserId: job.data.uleUserId },
+        });
 
-          if (enlaceUser) {
-            await prisma.pilaPlanilla.create({
-              data: {
-                uleUserId: job.data.uleUserId,
-                enlaceUserId: enlaceUser.id,
-                taskId: task.id,
-                paymentId: job.data.paymentId || '',
-                numeroPlanilla: liquidacionResult.data.numeroPlanilla!,
-                periodo: job.data.pilaData.periodo,
-                ingresoBase: job.data.pilaData.ingresoBase,
-                ibc: job.data.pilaData.ibc,
-                salud: job.data.pilaData.salud,
-                pension: job.data.pilaData.pension,
-                arl: job.data.pilaData.arl,
-                total: job.data.pilaData.total,
-                estadoPago: 'PENDIENTE',
-                fechaLimite: liquidacionResult.data.fechaLimite || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-              },
-            });
-          }
+        if (enlaceUser) {
+          await prisma.pilaPlanilla.create({
+            data: {
+              uleUserId: job.data.uleUserId,
+              enlaceUserId: enlaceUser.id,
+              taskId: task.id,
+              paymentId: job.data.paymentId || '',
+              numeroPlanilla: liquidacionResult.numeroPlanilla!,
+              periodo: job.data.pilaData.periodo,
+              ingresoBase: job.data.pilaData.ingresoBase,
+              ibc: job.data.pilaData.ibc,
+              salud: job.data.pilaData.salud,
+              pension: job.data.pilaData.pension,
+              arl: job.data.pilaData.arl,
+              total: job.data.pilaData.total,
+              estadoPago: 'PENDIENTE',
+              fechaLiquidacion: new Date(),
+              fechaLimite:
+                liquidacionResult.fechaLimite || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            },
+          });
         }
 
         await logTaskProgress(task.id, 'INFO', 'FULL_FLOW completed successfully');
@@ -416,7 +432,11 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
               alreadyExists: registroResult.alreadyExists,
               warnings: registroResult.warnings,
             },
-            liquidacion: liquidacionResult.data,
+            liquidacion: {
+              numeroPlanilla: liquidacionResult.numeroPlanilla,
+              fechaLimite: liquidacionResult.fechaLimite,
+              urlPSE: liquidacionResult.urlPSE,
+            },
           },
           duration: Date.now() - startTime,
         };

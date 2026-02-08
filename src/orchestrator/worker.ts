@@ -11,6 +11,8 @@ import { TaskInput, TaskResult } from '../types';
 import { registrarUsuario } from '../bots/enlace/registro.bot';
 import { liquidarPilaConConfirmacion } from '../bots/enlace/liquidacion.bot';
 import { descargarComprobanteEnlace } from '../bots/enlace/comprobante.bot';
+import { verificarEstadoPlanilla, descargarComprobante } from '../bots/enlace/comprobante.bot';
+import { uploadComprobanteToStorage } from '../storage/uploader';
 import { startScheduler, stopScheduler } from './scheduler';
 
 const prisma = new PrismaClient();
@@ -275,71 +277,144 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
       }
 
       case 'COMPROBANTE': {
+        const { numeroPlanilla, planillaId } = job.data;
 
-        // COMPROBANTE requires numeroPlanilla - should be passed in job.data
-        if (!job.data.numeroPlanilla) {
-          throw new Error('numeroPlanilla is required for COMPROBANTE task');
+        if (!numeroPlanilla || !planillaId) {
+          throw new Error('numeroPlanilla and planillaId required for COMPROBANTE task');
         }
 
-        const numeroPlanilla = job.data.numeroPlanilla;
-        const numeroDocumento = job.data.userData?.numeroDocumento;
-        const periodo = job.data.pilaData?.periodo;
-
-        // Log de inicio
-        await logTaskProgress(task.id, 'INFO', 'Starting comprobante download', {
-          numeroPlanilla,
-          documento: numeroDocumento,
-          periodo,
+        // Obtener datos de planilla
+        const planilla = await prisma.pilaPlanilla.findUnique({
+          where: { id: planillaId },
+          include: { enlaceUser: true },
         });
 
-        // Ejecutar bot de descarga
-        const comprobanteResult = await descargarComprobanteEnlace(numeroPlanilla, numeroDocumento, periodo);
-
-        if (!comprobanteResult.success) {
-          throw new Error(comprobanteResult.error || 'Comprobante download failed');
+        if (!planilla) {
+          throw new Error(`Planilla not found: ${planillaId}`);
         }
 
-        if (comprobanteResult.data) {
-          // Find planilla
-          const planilla = await prisma.pilaPlanilla.findUnique({
-            where: { numeroPlanilla },
+        // Log inicio
+        await logTaskProgress(task.id, 'INFO', 'Checking planilla payment status', {
+          numeroPlanilla,
+          planillaId,
+        });
+
+        // 1. Verificar estado
+        const status = await verificarEstadoPlanilla(numeroPlanilla);
+
+        if (status.estado !== 'PAGADA') {
+          jobLogger.info('Planilla not paid yet', {
+            numeroPlanilla,
+            estado: status.estado,
           });
 
-          if (!planilla) {
-            throw new Error(`Planilla ${numeroPlanilla} not found in database`);
+          // Actualizar estado si cambió
+          if (status.estado === 'RECHAZADA' || status.estado === 'VENCIDA') {
+            await prisma.pilaPlanilla.update({
+              where: { id: planillaId },
+              data: { estadoPago: status.estado },
+            });
+
+            await logTaskProgress(task.id, 'WARN', `Planilla status changed to ${status.estado}`, {
+              numeroPlanilla,
+              estado: status.estado,
+            });
           }
 
-          // Create Comprobante record
-          const comprobante = await prisma.comprobante.create({
-            data: {
-              planillaId: planilla.id,
-              uleUserId: planilla.uleUserId,
-              fileName: comprobanteResult.data.fileName!,
-              filePath: comprobanteResult.data.filePath!,
-              fileSize: comprobanteResult.data.fileSize!,
-            },
-          });
-
-          // Log de éxito
-          await logTaskProgress(task.id, 'INFO', 'Comprobante downloaded and saved', {
-            fileName: comprobante.fileName,
-            filePath: comprobante.filePath,
-            fileSize: comprobante.fileSize,
-          });
-
-          result = {
-            success: true,
-            data: {
-              comprobanteId: comprobante.id,
-              fileName: comprobante.fileName,
-              filePath: comprobante.filePath,
-              fileSize: comprobante.fileSize,
-            },
-            duration: comprobanteResult.duration || 0,
-          };
-        } else {
-          throw new Error('Comprobante download completed but no data returned');
+          throw new Error(`Planilla not paid: ${status.estado}`);
         }
+
+        // 2. Descargar comprobante
+        await logTaskProgress(task.id, 'INFO', 'Planilla is paid, downloading comprobante PDF', {
+          numeroPlanilla,
+          fechaPago: status.fechaPago,
+          valor: status.valor,
+        });
+
+        const downloadResult = await descargarComprobante(numeroPlanilla);
+
+        if (!downloadResult.success || !downloadResult.localPath) {
+          throw new Error(downloadResult.error || 'Download failed');
+        }
+
+        await logTaskProgress(task.id, 'INFO', 'Comprobante downloaded successfully', {
+          localPath: downloadResult.localPath,
+          fileName: downloadResult.fileName,
+          fileSize: downloadResult.fileSize,
+        });
+
+        // 3. Subir a storage de ULE
+        await logTaskProgress(task.id, 'INFO', 'Uploading comprobante to storage', {
+          localPath: downloadResult.localPath,
+        });
+
+        const uploadResult = await uploadComprobanteToStorage(
+          downloadResult.localPath,
+          {
+            userId: planilla.uleUserId,
+            numeroPlanilla,
+            periodo: planilla.periodo,
+            valor: planilla.total,
+            fechaPago: status.fechaPago || new Date(),
+          },
+          false // Don't cleanup yet - will do manually after DB save
+        );
+
+        if (!uploadResult.success || !uploadResult.url) {
+          throw new Error(uploadResult.error || 'Upload failed');
+        }
+
+        await logTaskProgress(task.id, 'INFO', 'Comprobante uploaded to storage', {
+          url: uploadResult.url,
+          publicId: uploadResult.publicId,
+        });
+
+        // 4. Guardar comprobante en DB
+        const comprobante = await prisma.comprobante.create({
+          data: {
+            planillaId,
+            uleUserId: planilla.uleUserId,
+            fileName: downloadResult.fileName!,
+            filePath: uploadResult.publicId!,
+            fileUrl: uploadResult.url,
+            fileSize: downloadResult.fileSize!,
+            downloadedAt: new Date(),
+            uploadedToUle: true,
+            uploadedAt: new Date(),
+          },
+        });
+
+        // 5. Actualizar planilla como pagada
+        await prisma.pilaPlanilla.update({
+          where: { id: planillaId },
+          data: {
+            estadoPago: 'PAGADA',
+            fechaPago: status.fechaPago || new Date(),
+          },
+        });
+
+        // 6. Limpiar archivo local
+        const { storageUploader } = await import('../storage/uploader');
+        await storageUploader.cleanupLocalFile(downloadResult.localPath);
+
+        // Log éxito
+        await logTaskProgress(task.id, 'INFO', 'Comprobante processed successfully', {
+          comprobanteId: comprobante.id,
+          fileUrl: uploadResult.url,
+          estadoPago: 'PAGADA',
+        });
+
+        result = {
+          success: true,
+          data: {
+            comprobanteId: comprobante.id,
+            fileUrl: uploadResult.url,
+            fileName: downloadResult.fileName,
+            fileSize: downloadResult.fileSize,
+            estadoPago: 'PAGADA',
+          },
+          duration: Date.now() - startTime,
+        };
 
         break;
       }

@@ -38,6 +38,9 @@ const SCHEDULES = {
 
   // Every 15 minutes - Monitor dead letter queue
   DEAD_LETTER_MONITOR: '*/15 * * * *',
+
+  // Every 2 hours - Check for paid planillas and download comprobantes
+  CHECK_PLANILLAS: '0 */2 * * *',
 };
 
 /**
@@ -229,6 +232,126 @@ async function monitorDeadLetterQueueTask() {
 }
 
 /**
+ * Check for paid planillas and create COMPROBANTE tasks
+ * FASE 4.4: Revisa planillas pendientes y descarga comprobantes cuando están pagadas
+ */
+async function checkPaidPlanillasTask() {
+  try {
+    logger.info('Running scheduled job: Check for paid planillas');
+
+    // Buscar planillas que están pendientes de pago
+    // y cuya fecha de liquidación fue hace más de 1 hora (dar tiempo para que se pague)
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+    const pendingPlanillas = await prisma.pilaPlanilla.findMany({
+      where: {
+        estadoPago: 'PENDIENTE',
+        fechaLiquidacion: {
+          lt: oneHourAgo, // Liquidadas hace más de 1 hora
+        },
+        fechaLimite: {
+          gte: new Date(), // No vencidas
+        },
+      },
+      include: {
+        comprobantes: true, // Para verificar si ya tiene comprobante
+      },
+      orderBy: {
+        fechaLiquidacion: 'asc', // Más antiguas primero
+      },
+      take: 20, // Procesar máximo 20 por corrida
+    });
+
+    if (pendingPlanillas.length === 0) {
+      logger.info('No pending planillas to check');
+      return;
+    }
+
+    logger.info(`Found ${pendingPlanillas.length} pending planillas to check`);
+
+    let tasksCreated = 0;
+    let alreadyPaid = 0;
+    let stillPending = 0;
+    let errors = 0;
+
+    for (const planilla of pendingPlanillas) {
+      try {
+        // Verificar si ya tiene comprobante
+        if (planilla.comprobantes && planilla.comprobantes.length > 0) {
+          logger.info('Planilla already has comprobante, skipping', {
+            planillaId: planilla.id,
+            numeroPlanilla: planilla.numeroPlanilla,
+          });
+          alreadyPaid++;
+          continue;
+        }
+
+        // Verificar si ya hay una tarea COMPROBANTE pendiente o procesando para esta planilla
+        const existingTask = await prisma.task.findFirst({
+          where: {
+            type: 'COMPROBANTE',
+            inputData: {
+              path: ['planillaId'],
+              equals: planilla.id,
+            },
+            status: {
+              in: ['PENDING', 'PROCESSING', 'WAITING'],
+            },
+          },
+        });
+
+        if (existingTask) {
+          logger.info('COMPROBANTE task already exists for planilla', {
+            planillaId: planilla.id,
+            taskId: existingTask.id,
+          });
+          continue;
+        }
+
+        // Crear tarea COMPROBANTE (el worker verificará si está pagada)
+        const { addComprobanteTask } = await import('./queue.config');
+
+        const job = await addComprobanteTask({
+          type: 'COMPROBANTE',
+          uleUserId: planilla.uleUserId,
+          numeroPlanilla: planilla.numeroPlanilla,
+          planillaId: planilla.id,
+          priority: 4, // Prioridad media-baja (no es urgente)
+        } as any);
+
+        logger.info('Created COMPROBANTE task', {
+          taskId: job.id,
+          numeroPlanilla: planilla.numeroPlanilla,
+          planillaId: planilla.id,
+        });
+
+        tasksCreated++;
+
+        // Esperar un poco entre tareas para no sobrecargar
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      } catch (error) {
+        logger.error('Error creating COMPROBANTE task for planilla', {
+          planillaId: planilla.id,
+          numeroPlanilla: planilla.numeroPlanilla,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+        errors++;
+      }
+    }
+
+    logger.info('Check paid planillas completed', {
+      checked: pendingPlanillas.length,
+      tasksCreated,
+      alreadyPaid,
+      stillPending,
+      errors,
+    });
+  } catch (error) {
+    logger.error('Failed to check paid planillas', { error });
+  }
+}
+
+/**
  * Sync task statuses between database and queue
  * Ensures database is consistent with actual job states
  */
@@ -355,7 +478,14 @@ export function startScheduler() {
   });
   logger.info('Scheduled: Sync task statuses (every hour)');
 
-  logger.info('Scheduler started successfully - 7 jobs scheduled');
+  // Check for paid planillas every 2 hours
+  cron.schedule(SCHEDULES.CHECK_PLANILLAS, checkPaidPlanillasTask, {
+    name: 'check-paid-planillas',
+    timezone: 'America/Bogota',
+  });
+  logger.info('Scheduled: Check paid planillas (every 2 hours)');
+
+  logger.info('Scheduler started successfully - 8 jobs scheduled');
 
   // Run health check immediately on startup
   healthCheckTask();

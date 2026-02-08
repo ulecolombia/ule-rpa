@@ -926,6 +926,325 @@ function parseValor(valorText: string | null): number | undefined {
 }
 
 // ============================================================================
+// FASE 4.2 - DESCARGA DE COMPROBANTE PDF
+// ============================================================================
+
+/**
+ * Resultado de descarga de comprobante
+ */
+export interface DownloadResult {
+  success: boolean;
+  localPath?: string;
+  fileName?: string;
+  fileSize?: number;
+  error?: string;
+}
+
+/**
+ * Descarga el comprobante PDF de una planilla pagada
+ *
+ * @param numeroPlanilla - Número de planilla a descargar
+ * @param outputDir - Directorio donde guardar el PDF (default: ./downloads/comprobantes)
+ * @returns Resultado de la descarga con path local y metadatos
+ *
+ * @example
+ * const result = await descargarComprobante('123456789');
+ * if (result.success) {
+ *   console.log('PDF descargado:', result.localPath);
+ *   console.log('Tamaño:', result.fileSize);
+ * }
+ */
+export async function descargarComprobante(
+  numeroPlanilla: string,
+  outputDir: string = './downloads/comprobantes'
+): Promise<DownloadResult> {
+  logger.info('Downloading comprobante PDF', { numeroPlanilla, outputDir });
+
+  try {
+    // 1. Verificar estado de planilla
+    logger.info('Step 1/7: Verifying planilla status');
+    const status = await verificarEstadoPlanilla(numeroPlanilla);
+
+    if (status.estado !== 'PAGADA') {
+      logger.warn('Planilla is not paid yet', {
+        numeroPlanilla,
+        estado: status.estado,
+      });
+      return {
+        success: false,
+        error: `Planilla not paid yet: ${status.estado}`,
+      };
+    }
+
+    logger.info('Planilla is paid, proceeding with download', {
+      numeroPlanilla,
+      fechaPago: status.fechaPago,
+      valor: status.valor,
+    });
+
+    const page = await enlaceAuth.ensureAuthenticated();
+
+    // 2. Asegurar que estamos en la página de comprobantes
+    logger.info('Step 2/7: Ensuring we are on comprobantes page');
+    const currentUrl = page.url();
+
+    if (!currentUrl.includes('/comprobantes')) {
+      logger.info('Not on comprobantes page, navigating');
+      await page.goto(URL_PATTERNS.COMPROBANTES, {
+        waitUntil: 'networkidle0',
+        timeout: 30000,
+      });
+      await sleep(2000);
+
+      // Re-buscar planilla
+      logger.info('Re-searching for planilla after navigation');
+      const searchInputExists = await elementExists(
+        page,
+        SELECTORS.COMPROBANTES.BUSCAR_INPUT
+      );
+
+      if (searchInputExists) {
+        await waitAndType(page, SELECTORS.COMPROBANTES.BUSCAR_INPUT, numeroPlanilla, {
+          clear: true,
+        });
+        await sleep(3000);
+      }
+    }
+
+    await browserManager.takeScreenshot(page, 'comprobante-before-download');
+
+    // 3. Crear directorio de descarga
+    logger.info('Step 3/7: Creating download directory');
+    await fs.mkdir(outputDir, { recursive: true });
+    logger.info('Download directory ready', { outputDir });
+
+    // 4. Configurar descarga usando CDP
+    logger.info('Step 4/7: Configuring download behavior via CDP');
+    const client = await page.target().createCDPSession();
+    await client.send('Page.setDownloadBehavior', {
+      behavior: 'allow',
+      downloadPath: path.resolve(outputDir),
+    });
+    logger.info('CDP download behavior configured');
+
+    // 5. Encontrar y hacer click en botón de descarga
+    logger.info('Step 5/7: Finding and clicking download button');
+
+    const downloadButton = await page.evaluate((numPlanilla) => {
+      const table = document.querySelector('table');
+      if (!table) return null;
+
+      const rows = table.querySelectorAll('tbody tr');
+
+      for (const row of rows) {
+        const cells = row.querySelectorAll('td');
+        const planillaCell = Array.from(cells).find((cell) =>
+          cell.textContent?.includes(numPlanilla)
+        );
+
+        if (planillaCell) {
+          // Estrategia 1: Buscar botón con texto "Descargar"
+          const downloadBtnDescargar = row.querySelector('button');
+          const buttons = row.querySelectorAll('button');
+
+          for (const btn of buttons) {
+            if (
+              btn.textContent?.toLowerCase().includes('descargar') ||
+              btn.textContent?.toLowerCase().includes('pdf')
+            ) {
+              (btn as HTMLElement).click();
+              return 'button-descargar';
+            }
+          }
+
+          // Estrategia 2: Buscar link PDF directo
+          const pdfLink = row.querySelector('a[href*=".pdf"]');
+          if (pdfLink) {
+            (pdfLink as HTMLElement).click();
+            return 'link-pdf';
+          }
+
+          // Estrategia 3: Buscar cualquier botón en la fila (último recurso)
+          if (downloadBtnDescargar) {
+            (downloadBtnDescargar as HTMLElement).click();
+            return 'button-generic';
+          }
+        }
+      }
+
+      return null;
+    }, numeroPlanilla);
+
+    if (!downloadButton) {
+      await browserManager.takeScreenshot(page, 'comprobante-download-button-not-found');
+      throw new BotError('Could not find download button or PDF link');
+    }
+
+    logger.info('Download initiated', { method: downloadButton });
+    await browserManager.takeScreenshot(page, 'comprobante-download-clicked');
+
+    // 6. Esperar a que se descargue el archivo
+    logger.info('Step 6/7: Waiting for download to complete');
+    const fileName = await waitForDownload(outputDir, 30000);
+
+    if (!fileName) {
+      await browserManager.takeScreenshot(page, 'comprobante-download-timeout');
+      throw new BotError('Download timeout - no file received after 30 seconds');
+    }
+
+    const localPath = path.join(outputDir, fileName);
+    logger.info('File downloaded', { fileName, localPath });
+
+    // 7. Verificar que el archivo existe y tiene contenido
+    logger.info('Step 7/7: Verifying downloaded file');
+    const stats = await fs.stat(localPath);
+
+    if (stats.size < 1000) {
+      // PDF muy pequeño, probablemente corrupto
+      logger.error('Downloaded file is too small', { size: stats.size });
+      throw new BotError(`Downloaded file too small: ${stats.size} bytes (expected > 1KB)`);
+    }
+
+    // Verificar que es un PDF válido
+    const fileBuffer = await fs.readFile(localPath);
+    const isPDF = fileBuffer.toString('ascii', 0, 4) === '%PDF';
+
+    if (!isPDF) {
+      logger.warn('Downloaded file may not be a valid PDF');
+    }
+
+    // 8. Renombrar archivo con nombre descriptivo
+    const timestamp = new Date().getTime();
+    const newFileName = `comprobante_${numeroPlanilla}_${timestamp}.pdf`;
+    const newPath = path.join(outputDir, newFileName);
+
+    await fs.rename(localPath, newPath);
+    logger.info('File renamed to descriptive name', { newFileName });
+
+    logger.info('✅ Comprobante downloaded successfully', {
+      numeroPlanilla,
+      localPath: newPath,
+      fileName: newFileName,
+      fileSize: stats.size,
+    });
+
+    return {
+      success: true,
+      localPath: newPath,
+      fileName: newFileName,
+      fileSize: stats.size,
+    };
+  } catch (error) {
+    const page = await enlaceAuth.ensureAuthenticated();
+    await browserManager.takeScreenshot(page, 'comprobante-download-error');
+    logger.error('❌ Error downloading comprobante', { numeroPlanilla, error });
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+/**
+ * Espera a que un archivo se descargue en el directorio especificado
+ *
+ * @param downloadDir - Directorio donde se guardará el archivo
+ * @param timeout - Tiempo máximo de espera en ms (default: 30000)
+ * @returns Nombre del archivo descargado, o null si timeout
+ *
+ * @example
+ * const fileName = await waitForDownload('./downloads', 30000);
+ * if (fileName) {
+ *   console.log('Archivo descargado:', fileName);
+ * }
+ */
+async function waitForDownload(
+  downloadDir: string,
+  timeout: number = 30000
+): Promise<string | null> {
+  const startTime = Date.now();
+  let lastFileCount = 0;
+
+  logger.info('Waiting for file download', { downloadDir, timeout });
+
+  while (Date.now() - startTime < timeout) {
+    try {
+      const files = await fs.readdir(downloadDir);
+
+      // Buscar archivos PDF que no sean temporales
+      const pdfFiles = files.filter(
+        (file) =>
+          file.endsWith('.pdf') &&
+          !file.endsWith('.crdownload') && // Chrome temp
+          !file.endsWith('.tmp') && // Generic temp
+          !file.endsWith('.download') // Firefox temp
+      );
+
+      // Log progress si cambia el número de archivos
+      if (pdfFiles.length !== lastFileCount) {
+        logger.info('PDF files in download directory', { count: pdfFiles.length });
+        lastFileCount = pdfFiles.length;
+      }
+
+      if (pdfFiles.length > 0) {
+        // Obtener stats de todos los archivos PDF
+        const fileStats = await Promise.all(
+          pdfFiles.map(async (file) => {
+            const filePath = path.join(downloadDir, file);
+            const stats = await fs.stat(filePath);
+            return {
+              name: file,
+              mtime: stats.mtime,
+              mtimeMs: stats.mtimeMs,
+              size: stats.size,
+            };
+          })
+        );
+
+        // Ordenar por fecha de modificación (más reciente primero)
+        fileStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+        const newestFile = fileStats[0];
+
+        // Verificar que el archivo fue creado/modificado recientemente (últimos 10 segundos)
+        const age = Date.now() - newestFile.mtimeMs;
+
+        if (age < 10000) {
+          // Esperar un poco más para asegurar que terminó de escribirse
+          await sleep(500);
+
+          // Verificar que el archivo tiene contenido
+          const finalStats = await fs.stat(path.join(downloadDir, newestFile.name));
+
+          if (finalStats.size > 0) {
+            logger.info('Download completed', {
+              fileName: newestFile.name,
+              fileSize: finalStats.size,
+              ageMs: age,
+            });
+            return newestFile.name;
+          }
+        }
+      }
+
+      // Esperar 500ms antes de revisar de nuevo
+      await sleep(500);
+    } catch (error) {
+      logger.warn('Error checking for downloaded file', { error });
+    }
+  }
+
+  logger.error('Download timeout - no file received', {
+    downloadDir,
+    timeout,
+    elapsedTime: Date.now() - startTime,
+  });
+
+  return null;
+}
+
+// ============================================================================
 // SINGLETON INSTANCE
 // ============================================================================
 

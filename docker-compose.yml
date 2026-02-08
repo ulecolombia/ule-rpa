@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ule-rpa-postgres
+    environment:
+      POSTGRES_USER: ule
+      POSTGRES_PASSWORD: ule_password
+      POSTGRES_DB: ule_rpa
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ule"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ule-rpa-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Descomentar para producción
+  # app:
+  #   build: .
+  #   container_name: ule-rpa-service
+  #   ports:
+  #     - '3001:3001'
+  #   environment:
+  #     - NODE_ENV=production
+  #     - PORT=3001
+  #     - DATABASE_URL=postgresql://ule:ule_password@postgres:5432/ule_rpa?schema=public
+  #     - REDIS_HOST=redis
+  #     - REDIS_PORT=6379
+  #     - PUPPETEER_HEADLESS=true
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./logs:/app/logs
+  #     - ./uploads:/app/uploads
+
+volumes:
+  postgres_data:
+  redis_data:

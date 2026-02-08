@@ -1,0 +1,237 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Usuarios de ULE registrados en Enlace
+model EnlaceUser {
+  id        String   @id @default(cuid())
+
+  // Referencia a usuario de ULE
+  uleUserId String   @unique
+
+  // Datos de identificación
+  tipoDocumento     String  // CC, CE, PEP
+  numeroDocumento   String  @unique
+  nombre            String
+
+  // Datos de Enlace
+  enlaceUserId      String?  // ID interno de Enlace (si existe)
+  enlaceStatus      EnlaceUserStatus @default(PENDING)
+
+  // Entidades de seguridad social
+  eps               String?
+  pension           String?
+  arl               String?
+
+  // Metadata
+  registeredAt      DateTime?
+  lastSyncAt        DateTime?
+
+  // Relaciones
+  tasks             Task[]
+  planillas         PilaPlanilla[]
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([uleUserId])
+  @@index([numeroDocumento])
+}
+
+enum EnlaceUserStatus {
+  PENDING           // Esperando registro en Enlace
+  REGISTERING       // Bot está registrando
+  REGISTERED        // Registrado exitosamente
+  ERROR             // Error en registro
+}
+
+// Tareas del RPA
+model Task {
+  id          String     @id @default(cuid())
+
+  type        TaskType
+  status      TaskStatus @default(PENDING)
+  priority    Int        @default(5)
+
+  // Referencias
+  uleUserId   String
+  enlaceUser  EnlaceUser? @relation(fields: [enlaceUserId], references: [id])
+  enlaceUserId String?
+
+  paymentId   String?    // ID del pago en ULE (si aplica)
+
+  // Datos de entrada (JSON flexible)
+  inputData   Json
+
+  // Resultado de la tarea
+  resultData  Json?
+  error       String?
+
+  // Métricas
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(3)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  failedAt    DateTime?
+
+  // Relaciones
+  logs        TaskLog[]
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([type, status])
+  @@index([uleUserId])
+  @@index([status, createdAt])
+}
+
+enum TaskType {
+  REGISTRO      // Registrar usuario en Enlace
+  LIQUIDACION   // Liquidar planilla de PILA
+  COMPROBANTE   // Descargar comprobante
+  FULL_FLOW     // Flujo completo (registro + liquidación)
+}
+
+enum TaskStatus {
+  PENDING       // En cola
+  PROCESSING    // Ejecutándose
+  COMPLETED     // Completada exitosamente
+  FAILED        // Falló después de reintentos
+  CANCELLED     // Cancelada manualmente
+  AWAITING      // Esperando acción externa (ej: pago PSE)
+}
+
+// Planillas de PILA liquidadas
+model PilaPlanilla {
+  id              String   @id @default(cuid())
+
+  // Referencias
+  uleUserId       String
+  enlaceUser      EnlaceUser @relation(fields: [enlaceUserId], references: [id])
+  enlaceUserId    String
+
+  taskId          String   // Task que la creó
+  paymentId       String   // Pago en ULE
+
+  // Datos de la planilla
+  numeroPlanilla  String   @unique
+  periodo         String   // "2026-02"
+
+  // Montos
+  ingresoBase     Int
+  ibc             Int
+  salud           Int
+  pension         Int
+  arl             Int
+  total           Int
+
+  // Estado
+  estadoPago      PagoStatus @default(PENDIENTE)
+
+  // Fechas
+  fechaLiquidacion DateTime @default(now())
+  fechaLimite      DateTime
+  fechaPago        DateTime?
+
+  // Comprobante
+  comprobante      Comprobante?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([uleUserId, periodo])
+  @@index([numeroPlanilla])
+  @@index([estadoPago])
+}
+
+enum PagoStatus {
+  PENDIENTE       // Liquidada, esperando pago
+  EN_PROCESO      // Pagando (PSE en curso)
+  PAGADA          // Pago confirmado
+  RECHAZADA       // Pago rechazado
+  VENCIDA         // Pasó fecha límite
+}
+
+// Comprobantes descargados
+model Comprobante {
+  id            String   @id @default(cuid())
+
+  // Referencias
+  planilla      PilaPlanilla @relation(fields: [planillaId], references: [id])
+  planillaId    String   @unique
+
+  uleUserId     String
+
+  // Archivo
+  fileName      String
+  filePath      String
+  fileUrl       String?  // URL pública si aplica
+  fileSize      Int
+  mimeType      String   @default("application/pdf")
+
+  // Metadata
+  downloadedAt  DateTime @default(now())
+  uploadedToUle Boolean  @default(false)
+  uploadedAt    DateTime?
+
+  createdAt     DateTime @default(now())
+
+  @@index([uleUserId])
+}
+
+// Logs detallados de tareas
+model TaskLog {
+  id        String   @id @default(cuid())
+
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId    String
+
+  level     LogLevel
+  message   String
+  details   Json?
+
+  // Screenshots en caso de error
+  screenshot String?
+
+  timestamp DateTime @default(now())
+
+  @@index([taskId, timestamp])
+  @@index([level])
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+// Sesiones de bot (para reutilizar)
+model BotSession {
+  id            String   @id @default(cuid())
+
+  sessionType   String   // "enlace_admin"
+
+  // Datos de sesión
+  cookies       Json
+  localStorage  Json?
+  sessionData   Json?
+
+  isValid       Boolean  @default(true)
+  lastUsedAt    DateTime @default(now())
+  expiresAt     DateTime
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([sessionType, isValid])
+}

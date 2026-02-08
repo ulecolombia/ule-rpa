@@ -1,0 +1,407 @@
+/**
+ * Comprobante Bot for Enlace Operativo
+ * Handles downloading PILA payment receipts/vouchers
+ */
+
+import { Page } from 'puppeteer';
+import fs from 'fs/promises';
+import path from 'path';
+import { logger } from '../../utils/logger';
+import { BotResponse, EnlaceComprobanteResult } from '../../types';
+import { SELECTORS, URL_PATTERNS } from '../utils/selectors';
+import {
+  waitAndClick,
+  waitAndType,
+  sleep,
+  elementExists,
+  randomDelay,
+  scrollToElement,
+} from '../utils/wait';
+import { browserManager } from '../utils/browser';
+import { BotError } from '../../utils/errors';
+import { enlaceAuth } from './auth.bot';
+
+/**
+ * Comprobante Bot Class
+ * Manages PILA receipt download flow in Enlace Operativo
+ */
+export class EnlaceComprobanteBot {
+  private readonly DOWNLOADS_PATH = './uploads/comprobantes';
+  private readonly DOWNLOAD_TIMEOUT_MS = 60000; // 1 minute
+
+  /**
+   * Download comprobante (receipt) for a planilla
+   * @param numeroPlanilla - PILA payment slip number
+   * @param numeroDocumento - User document number (optional, for search)
+   * @param periodo - Payment period YYYY-MM (optional, for search)
+   * @returns Download result with file path
+   */
+  async descargarComprobante(
+    numeroPlanilla: string,
+    numeroDocumento?: string,
+    periodo?: string
+  ): Promise<BotResponse<EnlaceComprobanteResult>> {
+    const startTime = Date.now();
+
+    logger.info('Starting comprobante download', {
+      numeroPlanilla,
+      numeroDocumento,
+      periodo,
+    });
+
+    // Get authenticated page
+    const page = await enlaceAuth.ensureAuthenticated();
+
+    try {
+      // Ensure downloads directory exists
+      await this.ensureDownloadsDirectory();
+
+      // 1. Navigate to Comprobantes section
+      logger.info('Navigating to Comprobantes section');
+      await this.navigateToComprobantes(page);
+
+      // 2. Search for planilla
+      logger.info('Searching for planilla', { numeroPlanilla });
+      await this.searchPlanilla(page, numeroPlanilla, numeroDocumento, periodo);
+
+      // 3. Download comprobante
+      logger.info('Downloading comprobante');
+      const fileName = await this.downloadFile(page, numeroPlanilla, periodo);
+
+      // 4. Verify download
+      logger.info('Verifying download');
+      const filePath = path.join(this.DOWNLOADS_PATH, fileName);
+      const fileSize = await this.verifyDownload(filePath);
+
+      logger.info('✅ Comprobante downloaded successfully', {
+        fileName,
+        fileSize,
+      });
+
+      return {
+        success: true,
+        data: {
+          downloaded: true,
+          fileName,
+          filePath,
+          fileSize,
+        },
+        duration: Date.now() - startTime,
+      };
+    } catch (error) {
+      logger.error('❌ Comprobante download failed', {
+        error,
+        numeroPlanilla,
+      });
+
+      const screenshot = await browserManager.takeScreenshot(page, 'comprobante-error');
+
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown download error',
+        screenshot,
+        duration: Date.now() - startTime,
+      };
+    }
+  }
+
+  /**
+   * Ensure downloads directory exists
+   */
+  private async ensureDownloadsDirectory(): Promise<void> {
+    try {
+      await fs.mkdir(this.DOWNLOADS_PATH, { recursive: true });
+      logger.debug('Downloads directory ready', { path: this.DOWNLOADS_PATH });
+    } catch (error) {
+      logger.error('Failed to create downloads directory', { error });
+      throw new BotError('Failed to create downloads directory');
+    }
+  }
+
+  /**
+   * Navigate to Comprobantes section
+   */
+  private async navigateToComprobantes(page: Page): Promise<void> {
+    try {
+      // Try clicking menu item first
+      const menuItemExists = await elementExists(page, SELECTORS.COMPROBANTE.MENU_ITEM);
+
+      if (menuItemExists) {
+        await waitAndClick(page, SELECTORS.COMPROBANTE.MENU_ITEM);
+        await sleep(1000);
+      } else {
+        // Navigate directly to URL
+        logger.debug('Menu item not found, navigating to URL');
+        await page.goto(URL_PATTERNS.COMPROBANTES, {
+          waitUntil: 'networkidle2',
+          timeout: 30000,
+        });
+      }
+
+      await randomDelay(1000, 2000);
+      await browserManager.takeScreenshot(page, 'comprobantes-section');
+    } catch (error) {
+      throw new BotError('Failed to navigate to Comprobantes section');
+    }
+  }
+
+  /**
+   * Search for planilla by number, document, or period
+   */
+  private async searchPlanilla(
+    page: Page,
+    numeroPlanilla: string,
+    numeroDocumento?: string,
+    periodo?: string
+  ): Promise<void> {
+    try {
+      await browserManager.takeScreenshot(page, 'before-planilla-search');
+
+      // Fill planilla number input
+      const planillaInputExists = await elementExists(page, SELECTORS.COMPROBANTE.BUSCAR_PLANILLA);
+      if (planillaInputExists) {
+        logger.debug('Entering planilla number', { numeroPlanilla });
+        await waitAndType(page, SELECTORS.COMPROBANTE.BUSCAR_PLANILLA, numeroPlanilla, {
+          clear: true,
+          delay: 100,
+        });
+        await randomDelay(300, 500);
+      }
+
+      // Fill document number if provided
+      if (numeroDocumento) {
+        const docInputExists = await elementExists(page, SELECTORS.APORTANTES.BUSCAR_INPUT);
+        if (docInputExists) {
+          logger.debug('Entering document number', { numeroDocumento });
+          await waitAndType(page, SELECTORS.APORTANTES.BUSCAR_INPUT, numeroDocumento, {
+            clear: true,
+            delay: 100,
+          });
+          await randomDelay(300, 500);
+        }
+      }
+
+      // Fill period if provided
+      if (periodo) {
+        const periodoInputExists = await elementExists(page, SELECTORS.COMPROBANTE.BUSCAR_PERIODO);
+        if (periodoInputExists) {
+          logger.debug('Entering periodo', { periodo });
+          await waitAndType(page, SELECTORS.COMPROBANTE.BUSCAR_PERIODO, periodo, {
+            clear: true,
+            delay: 100,
+          });
+          await randomDelay(300, 500);
+        }
+      }
+
+      // Click search button
+      const searchButtonExists = await elementExists(page, SELECTORS.COMPROBANTE.BUSCAR_BUTTON);
+      if (searchButtonExists) {
+        logger.debug('Clicking search button');
+        await waitAndClick(page, SELECTORS.COMPROBANTE.BUSCAR_BUTTON);
+      } else {
+        // Try pressing Enter
+        await page.keyboard.press('Enter');
+      }
+
+      await sleep(2000);
+      await browserManager.takeScreenshot(page, 'planilla-search-results');
+
+      // Verify results exist
+      const noResultsExists = await elementExists(page, SELECTORS.APORTANTES.RESULTS.NO_RESULTS);
+      if (noResultsExists) {
+        throw new BotError('Planilla not found in search results');
+      }
+
+      logger.debug('Planilla found in search results');
+    } catch (error) {
+      if (error instanceof BotError) {
+        throw error;
+      }
+      throw new BotError('Failed to search for planilla');
+    }
+  }
+
+  /**
+   * Download the comprobante file
+   */
+  private async downloadFile(
+    page: Page,
+    numeroPlanilla: string,
+    periodo?: string
+  ): Promise<string> {
+    try {
+      await browserManager.takeScreenshot(page, 'before-download-click');
+
+      // Try multiple download button selectors
+      const downloadSelectors = [
+        SELECTORS.COMPROBANTE.DESCARGAR_PDF,
+        SELECTORS.COMPROBANTE.DESCARGAR_BUTTON,
+        SELECTORS.COMPROBANTE.VER_COMPROBANTE,
+      ];
+
+      let buttonClicked = false;
+
+      for (const selector of downloadSelectors) {
+        const buttonExists = await elementExists(page, selector);
+        if (buttonExists) {
+          logger.debug('Clicking download button', { selector });
+          await scrollToElement(page, selector);
+          await randomDelay(500, 1000);
+
+          // Set up download tracking before clicking
+          const downloadPromise = this.waitForDownload(page);
+
+          await waitAndClick(page, selector);
+          buttonClicked = true;
+
+          // Wait for download to complete
+          logger.info('Waiting for download to complete...');
+          const fileName = await downloadPromise;
+
+          logger.debug('Download completed', { fileName });
+          return fileName;
+        }
+      }
+
+      if (!buttonClicked) {
+        throw new BotError('Download button not found');
+      }
+
+      // Fallback: generate filename if download tracking failed
+      const timestamp = Date.now();
+      const fileName = `comprobante-${numeroPlanilla}-${periodo || timestamp}.pdf`;
+      logger.warn('Download tracking failed, using fallback filename', { fileName });
+      return fileName;
+    } catch (error) {
+      if (error instanceof BotError) {
+        throw error;
+      }
+      throw new BotError('Failed to download comprobante file');
+    }
+  }
+
+  /**
+   * Wait for file download to complete
+   */
+  private async waitForDownload(_page: Page): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new BotError('Download timeout after 1 minute'));
+      }, this.DOWNLOAD_TIMEOUT_MS);
+
+      // Monitor downloads directory for new files
+      const checkInterval = setInterval(async () => {
+        try {
+          const files = await fs.readdir(this.DOWNLOADS_PATH);
+
+          // Look for recently created PDF files
+          for (const file of files) {
+            if (file.endsWith('.pdf') && !file.includes('.crdownload')) {
+              const filePath = path.join(this.DOWNLOADS_PATH, file);
+              const stats = await fs.stat(filePath);
+
+              // Check if file was created in last 5 seconds
+              const age = Date.now() - stats.mtimeMs;
+              if (age < 5000) {
+                clearTimeout(timeout);
+                clearInterval(checkInterval);
+                resolve(file);
+                return;
+              }
+            }
+          }
+        } catch (error) {
+          logger.warn('Error checking downloads directory', { error });
+        }
+      }, 1000); // Check every second
+    });
+  }
+
+  /**
+   * Verify download was successful
+   */
+  private async verifyDownload(filePath: string): Promise<number> {
+    try {
+      // Wait a bit for file to be fully written
+      await sleep(1000);
+
+      // Check if file exists
+      try {
+        await fs.access(filePath);
+      } catch {
+        throw new BotError('Downloaded file not found');
+      }
+
+      // Get file size
+      const stats = await fs.stat(filePath);
+      const fileSize = stats.size;
+
+      // Verify file is not empty
+      if (fileSize === 0) {
+        throw new BotError('Downloaded file is empty');
+      }
+
+      // Verify file is a valid PDF (basic check)
+      const fileBuffer = await fs.readFile(filePath);
+      const isPDF = fileBuffer.toString('ascii', 0, 4) === '%PDF';
+
+      if (!isPDF) {
+        logger.warn('Downloaded file may not be a valid PDF');
+      }
+
+      logger.debug('Download verified successfully', { filePath, fileSize });
+      return fileSize;
+    } catch (error) {
+      if (error instanceof BotError) {
+        throw error;
+      }
+      throw new BotError('Failed to verify download');
+    }
+  }
+
+  /**
+   * Delete old comprobantes (cleanup)
+   * @param daysOld - Delete files older than this many days
+   */
+  async cleanupOldFiles(daysOld: number = 30): Promise<number> {
+    try {
+      const files = await fs.readdir(this.DOWNLOADS_PATH);
+      const cutoffTime = Date.now() - daysOld * 24 * 60 * 60 * 1000;
+      let deletedCount = 0;
+
+      for (const file of files) {
+        const filePath = path.join(this.DOWNLOADS_PATH, file);
+        const stats = await fs.stat(filePath);
+
+        if (stats.mtimeMs < cutoffTime) {
+          await fs.unlink(filePath);
+          deletedCount++;
+          logger.debug('Deleted old comprobante', { file });
+        }
+      }
+
+      logger.info('Cleanup completed', { deletedCount, daysOld });
+      return deletedCount;
+    } catch (error) {
+      logger.error('Error during cleanup', { error });
+      return 0;
+    }
+  }
+}
+
+/**
+ * Singleton instance
+ */
+export const enlaceComprobante = new EnlaceComprobanteBot();
+
+/**
+ * Quick function for downloading comprobante
+ */
+export async function descargarComprobanteEnlace(
+  numeroPlanilla: string,
+  numeroDocumento?: string,
+  periodo?: string
+): Promise<BotResponse<EnlaceComprobanteResult>> {
+  return enlaceComprobante.descargarComprobante(numeroPlanilla, numeroDocumento, periodo);
+}

@@ -10,14 +10,12 @@ import { logger, createChildLogger } from '../utils/logger';
 import { TaskInput, TaskResult } from '../types';
 import { createBrowser, createPage, closeBrowser } from '../bots/utils/browser';
 import { authenticateEnlace, logoutEnlace } from '../bots/enlace/auth.bot';
-import { registrarUsuarioEnlace } from '../bots/enlace/registro.bot';
+import { registrarUsuario } from '../bots/enlace/registro.bot'; // UPDATED: New function
 import { liquidarPilaEnlace } from '../bots/enlace/liquidacion.bot';
 import { descargarComprobanteEnlace } from '../bots/enlace/comprobante.bot';
 import {
-  RegistroPayload,
   LiquidacionPayload,
   ComprobantePayload,
-  FullFlowPayload,
 } from '../types/task.types';
 import { startScheduler, stopScheduler } from './scheduler';
 
@@ -94,7 +92,11 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
   }
 
   let browser;
-  let result: TaskResult;
+  let result: TaskResult = {
+    success: false,
+    data: undefined,
+    duration: 0,
+  };
 
   try {
     // Create browser instance
@@ -118,48 +120,82 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
 
     switch (job.data.type) {
       case 'REGISTRO': {
-        if (!job.data.userData) {
+        const { userData, uleUserId } = job.data;
+
+        if (!userData) {
           throw new Error('userData is required for REGISTRO task');
         }
 
-        const registroPayload: RegistroPayload = {
-          tipoDocumento: job.data.userData.tipoDocumento,
-          numeroDocumento: job.data.userData.numeroDocumento,
-          nombre: job.data.userData.nombre,
-          eps: job.data.userData.eps,
-          pension: job.data.userData.pension,
-          arl: job.data.userData.arl,
-        };
+        // Log de inicio
+        await logTaskProgress(task.id, 'INFO', 'Starting user registration', {
+          documento: userData.numeroDocumento,
+          nombre: userData.nombre,
+        });
 
-        const registroResult = await registrarUsuarioEnlace(page, registroPayload);
+        // Ejecutar bot de registro (nueva función)
+        const registroResult = await registrarUsuario(userData);
 
-        if (registroResult.success) {
-          // Update EnlaceUser status
-          const enlaceUser = await prisma.enlaceUser.findUnique({
-            where: { uleUserId: job.data.uleUserId },
-          });
+        if (!registroResult.success) {
+          throw new Error(registroResult.error || 'Registration failed');
+        }
 
-          if (enlaceUser) {
-            await prisma.enlaceUser.update({
-              where: { id: enlaceUser.id },
-              data: {
-                enlaceUserId: registroResult.data?.enlaceUserId,
-                enlaceStatus: 'REGISTERED',
-                registeredAt: new Date(),
-                lastSyncAt: new Date(),
-              },
-            });
-            await logTaskProgress(task.id, 'INFO', 'User registered in Enlace', {
-              enlaceUserId: registroResult.data?.enlaceUserId,
-            });
+        // Guardar usuario en tabla EnlaceUser
+        const enlaceUser = await prisma.enlaceUser.upsert({
+          where: { uleUserId },
+          create: {
+            uleUserId,
+            tipoDocumento: userData.tipoDocumento,
+            numeroDocumento: userData.numeroDocumento,
+            nombre: userData.nombre,
+            eps: userData.eps,
+            pension: userData.pension,
+            arl: userData.arl,
+            enlaceUserId: registroResult.enlaceUserId,
+            enlaceStatus: 'REGISTERED',
+            registeredAt: new Date(),
+            lastSyncAt: new Date(),
+          },
+          update: {
+            enlaceUserId: registroResult.enlaceUserId,
+            enlaceStatus: 'REGISTERED',
+            nombre: userData.nombre,
+            eps: userData.eps,
+            pension: userData.pension,
+            arl: userData.arl,
+            lastSyncAt: new Date(),
+          },
+        });
+
+        // Log de éxito
+        await logTaskProgress(
+          task.id,
+          'INFO',
+          registroResult.alreadyExists
+            ? 'User already existed in Enlace'
+            : 'User registered successfully',
+          {
+            enlaceUserId: registroResult.enlaceUserId,
+            alreadyExists: registroResult.alreadyExists,
+            warnings: registroResult.warnings,
           }
+        );
+
+        // Log warnings if any
+        if (registroResult.warnings && registroResult.warnings.length > 0) {
+          await logTaskProgress(task.id, 'WARN', 'Registration completed with warnings', {
+            warnings: registroResult.warnings,
+          });
         }
 
         result = {
-          success: registroResult.success,
-          data: registroResult.data,
-          error: registroResult.error,
-          duration: registroResult.duration || 0,
+          success: true,
+          data: {
+            enlaceUserId: registroResult.enlaceUserId,
+            alreadyExists: registroResult.alreadyExists,
+            warnings: registroResult.warnings,
+            enlaceUserRecordId: enlaceUser.id,
+          },
+          duration: Date.now() - startTime,
         };
         break;
       }
@@ -274,21 +310,35 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
 
         await logTaskProgress(task.id, 'INFO', 'Starting FULL_FLOW: Registration phase');
 
-        // Phase 1: Registration
-        const registroPayload: RegistroPayload = {
-          tipoDocumento: job.data.userData.tipoDocumento,
-          numeroDocumento: job.data.userData.numeroDocumento,
-          nombre: job.data.userData.nombre,
-          eps: job.data.userData.eps,
-          pension: job.data.userData.pension,
-          arl: job.data.userData.arl,
-        };
-
-        const registroResult = await registrarUsuarioEnlace(page, registroPayload);
+        // Phase 1: Registration (using new function)
+        const registroResult = await registrarUsuario(job.data.userData);
 
         if (!registroResult.success) {
           throw new Error(`Registration failed: ${registroResult.error}`);
         }
+
+        // Save/update EnlaceUser
+        await prisma.enlaceUser.upsert({
+          where: { uleUserId: job.data.uleUserId },
+          create: {
+            uleUserId: job.data.uleUserId,
+            tipoDocumento: job.data.userData.tipoDocumento,
+            numeroDocumento: job.data.userData.numeroDocumento,
+            nombre: job.data.userData.nombre,
+            eps: job.data.userData.eps,
+            pension: job.data.userData.pension,
+            arl: job.data.userData.arl,
+            enlaceUserId: registroResult.enlaceUserId,
+            enlaceStatus: 'REGISTERED',
+            registeredAt: new Date(),
+            lastSyncAt: new Date(),
+          },
+          update: {
+            enlaceUserId: registroResult.enlaceUserId,
+            enlaceStatus: 'REGISTERED',
+            lastSyncAt: new Date(),
+          },
+        });
 
         await logTaskProgress(task.id, 'INFO', 'Registration completed, starting liquidation');
 
@@ -316,10 +366,14 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
         result = {
           success: true,
           data: {
-            registro: registroResult.data,
+            registro: {
+              enlaceUserId: registroResult.enlaceUserId,
+              alreadyExists: registroResult.alreadyExists,
+              warnings: registroResult.warnings,
+            },
             liquidacion: liquidacionResult.data,
           },
-          duration: (registroResult.duration || 0) + (liquidacionResult.duration || 0),
+          duration: Date.now() - startTime,
         };
         break;
       }
@@ -361,11 +415,17 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
 
     jobLogger.error('Task failed', { error: errorMessage, stack: errorStack });
 
+    // Guardar log de error detallado
     await logTaskProgress(
       task.id,
       'ERROR',
-      `Task failed: ${errorMessage}`,
-      { stack: errorStack }
+      'Task execution failed',
+      {
+        error: errorMessage,
+        stack: errorStack,
+        attempt: job.attemptsMade + 1,
+        maxAttempts: 3,
+      }
     );
 
     // Determine if should retry
@@ -381,6 +441,19 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
         resultData: result?.data as any,
       },
     });
+
+    // Log final failure if max attempts reached
+    if (!shouldRetry) {
+      await logTaskProgress(
+        task.id,
+        'ERROR',
+        'Task failed permanently after max attempts',
+        {
+          error: errorMessage,
+          totalAttempts: job.attemptsMade + 1,
+        }
+      );
+    }
 
     // Move to dead letter queue if max attempts reached
     if (!shouldRetry) {

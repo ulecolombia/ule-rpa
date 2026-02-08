@@ -136,6 +136,7 @@ export async function addLiquidacionTask(data: TaskInput): Promise<Job> {
 export async function addComprobanteTask(data: TaskInput): Promise<Job> {
   logger.info('Adding COMPROBANTE task to queue', {
     userId: data.uleUserId,
+    numeroPlanilla: data.numeroPlanilla,
     priority: data.priority,
   });
 
@@ -144,8 +145,8 @@ export async function addComprobanteTask(data: TaskInput): Promise<Job> {
     data,
     {
       priority: data.priority || 7,
-      timeout: 3 * 60 * 1000, // 3 minutes
-      jobId: `comprobante-${data.uleUserId}-${Date.now()}`,
+      timeout: 5 * 60 * 1000, // 5 minutos
+      jobId: `comprobante-${data.numeroPlanilla}-${Date.now()}`,
     }
   );
 }
@@ -192,7 +193,7 @@ export async function addTaskToQueue(
   const defaultTimeout = {
     REGISTRO: 5 * 60 * 1000,
     LIQUIDACION: 10 * 60 * 1000,
-    COMPROBANTE: 3 * 60 * 1000,
+    COMPROBANTE: 5 * 60 * 1000,
     FULL_FLOW: 15 * 60 * 1000,
   }[taskType] || 5 * 60 * 1000;
 

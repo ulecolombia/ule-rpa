@@ -729,16 +729,274 @@ curl -X GET http://localhost:3001/api/tasks/abc123 \
 
 ---
 
+### 10. Sistema de Testing Completo ✅ (Subfase 2.9)
+**Fecha**: 2026-02-08
+**Archivos**: `tests/`, `jest.config.js`, `.env.test`
+
+**Funcionalidad**:
+Sistema completo de testing de integración para verificar todos los bots y flujos RPA.
+
+#### Archivos Creados (8 archivos, 1,100+ líneas):
+
+**1. Configuración Jest**:
+- `jest.config.js` (actualizado)
+  - Timeout de 120 segundos para tests RPA
+  - Ejecución secuencial (maxWorkers: 1)
+  - Setup automático con `tests/setup.ts`
+  - Coverage configuration
+  - Path aliases para imports
+
+**2. Setup Global**:
+- `tests/setup.ts`
+  - Carga `.env.test` automáticamente
+  - Timeout global de 2 minutos
+  - Custom matchers (toBeValidTaskId, toBeEnlaceUserId, toBePlanillaNumber)
+  - Logging de inicio/fin de suite
+
+**3. Test Utilities**:
+- `tests/utils/test-data.ts` (300+ líneas)
+  - `generateTestUser()` - Genera usuarios de prueba únicos
+  - `generateTestPilaData()` - Genera datos PILA válidos
+  - `TEST_USERS` - Casos predefinidos (nonExistent, minimal, complete, foreigner)
+  - `VALIDATION_ERRORS` - Casos de error para testing
+  - `retryOperation()` - Helper para operaciones flaky
+  - `sleep()` - Helper para delays
+  - `generateTestId()` - IDs únicos para tests
+
+**4. Integration Tests**:
+
+**A. Registration Tests** (`tests/integration/registro.test.ts` - 350+ líneas):
+```typescript
+Tests incluidos:
+✅ Search for non-existent user
+✅ Validate user data before registration
+✅ Successfully register new user
+✅ Find newly registered user
+✅ Detect duplicate registration
+✅ Handle registration with minimal data
+✅ Handle registration with complete data
+✅ Handle CE (foreign ID) registration
+✅ Handle network timeout gracefully
+✅ Take screenshot on error
+✅ Maintain session across operations
+```
+
+**B. Search Tests** (`tests/integration/search.test.ts` - 250+ líneas):
+```typescript
+Tests incluidos:
+✅ Find user by document number
+✅ Return complete user data when found
+✅ Return not found for non-existent user
+✅ Handle invalid document numbers
+✅ Handle empty document number
+✅ Quick existence check (usuarioExiste)
+✅ Complete search within reasonable time
+✅ Handle multiple sequential searches
+✅ Handle navigation errors gracefully
+✅ Use fallback strategies when primary fails
+```
+
+**C. Liquidation Tests** (`tests/integration/liquidacion.test.ts` - 300+ líneas):
+```typescript
+Tests incluidos:
+✅ Successfully liquidate PILA for registered user
+✅ Handle user not found gracefully
+✅ Validate PILA data before submission
+✅ Handle 1 SMLMV (minimum salary)
+✅ Handle higher IBC (2 SMLMV)
+✅ Handle partial month (15 days)
+✅ Take screenshot on error
+✅ Handle timeout gracefully
+✅ Navigate to liquidacion section
+✅ Complete liquidation within reasonable time
+```
+
+**5. Environment Configuration**:
+- `.env.test`
+  - Variables de entorno para testing
+  - PUPPETEER_HEADLESS configurableRun tests watch tests
+  - Test credentials (usar cuenta de prueba!)
+  - TEST_EXISTING_USER_DOC y TEST_REGISTERED_USER_DOC
+
+**6. Documentation**:
+- `tests/TESTING.md` (600+ líneas)
+  - Guía completa de testing
+  - Setup instructions
+  - Running tests (10+ comandos)
+  - Test structure explanation
+  - Writing tests template
+  - Custom matchers documentation
+  - Troubleshooting guide completa
+  - Best practices
+
+**7. Package.json Scripts**:
+```bash
+npm test                           # Run all tests
+npm run test:integration           # Integration tests only
+npm run test:integration:registro  # Only registration tests
+npm run test:integration:search    # Only search tests
+npm run test:integration:liquidacion # Only liquidation tests
+npm run test:coverage              # With coverage report
+npm run test:verbose               # Verbose output
+npm run test:debug                 # Debug mode
+npm run test:watch                 # Watch mode
+```
+
+#### Features del Sistema de Testing:
+
+**Test Organization**:
+- 📁 `tests/integration/` - Integration tests (interact with real site)
+- 📁 `tests/unit/` - Unit tests (mocked)
+- 📁 `tests/utils/` - Shared utilities and helpers
+
+**Test Data Management**:
+- Generadores de datos aleatorios (`generateTestUser`)
+- Casos predefinidos para diferentes escenarios
+- Factory pattern para crear test data
+- Validation error cases para boundary testing
+
+**Custom Matchers**:
+```typescript
+expect(taskId).toBeValidTaskId();
+expect(enlaceUserId).toBeEnlaceUserId();
+expect(numeroPlanilla).toBePlanillaNumber();
+```
+
+**Retry Logic**:
+```typescript
+const result = await retryOperation(
+  () => registrarUsuario(testUser),
+  3, // max retries
+  1000 // delay ms
+);
+```
+
+**Timeouts Apropiados**:
+- Authentication: 180s (3 min para reCAPTCHA manual)
+- Registration: 120s (2 min)
+- Search: 60s (1 min)
+- Liquidation: 180s (3 min)
+
+**Error Handling**:
+- Screenshots automáticos en errores
+- Logging detallado de cada paso
+- Cleanup garantizado en afterAll
+- Graceful degradation en failures
+
+**Session Management**:
+- Login una vez en beforeAll
+- Reutilizar sesión entre tests
+- Logout y cleanup en afterAll
+- Verificación de session age
+
+#### Running Tests:
+
+**Quick Start**:
+```bash
+# 1. Configure environment
+cp .env.test .env.test.local
+# Edit credentials
+
+# 2. Setup test database
+createdb ule_rpa_test
+DATABASE_URL=postgresql://user:pass@localhost:5432/ule_rpa_test npx prisma migrate deploy
+
+# 3. Start Redis
+redis-server
+
+# 4. Run tests (headless)
+npm run test:integration
+
+# 5. Watch execution (debugging)
+PUPPETEER_HEADLESS=false npm run test:integration:registro
+```
+
+**Test Output Example**:
+```
+PASS tests/integration/registro.test.ts (150.234s)
+  Enlace Registration Bot - Integration Tests
+    🔐 Authenticating to Enlace...
+    ✅ Authenticated successfully
+    👤 Test user generated: 9999123456
+    Search for Non-Existent User
+      ✅ should return not found for non-existent user (5.2s)
+    User Registration
+      ✅ should validate user data before registration (1.5s)
+      ✅ should successfully register new user (45.3s)
+      📝 User registered successfully
+      📝 Enlace User ID: 12345678
+      ✅ should find newly registered user (8.7s)
+      ✅ should detect already existing user (42.1s)
+    🧹 Cleaning up...
+    ✅ Cleanup completed
+
+Test Suites: 1 passed, 1 total
+Tests:       11 passed, 11 total
+Snapshots:   0 total
+Time:        150.234s
+```
+
+#### Coverage:
+
+Run with coverage:
+```bash
+npm run test:coverage
+```
+
+Opens HTML report:
+```bash
+open coverage/lcov-report/index.html
+```
+
+Collects coverage from:
+- `src/**/*.ts`
+- Excludes: `*.d.ts`, tests, types
+
+#### Troubleshooting Guide Included:
+
+✅ Authentication errors
+✅ Test timeouts
+✅ Random failures
+✅ Selector not found
+✅ Database connection errors
+✅ Redis connection errors
+✅ Flaky tests
+
+#### Best Practices Documented:
+
+✅ Always use test environment
+✅ Clean up after tests
+✅ Use descriptive test names
+✅ Test one thing per test
+✅ Use test data factories
+✅ Handle flaky tests
+✅ Add delays when needed
+
+**Resultado**:
+- ✅ Sistema de testing completo
+- ✅ 3 suites de integration tests (900+ líneas)
+- ✅ Test utilities y helpers (300+ líneas)
+- ✅ Documentación exhaustiva (600+ líneas)
+- ✅ 10+ scripts npm para diferentes casos
+- ✅ Custom matchers para assertions
+- ✅ Retry logic para tests flaky
+- ✅ Environment configuration completa
+- ✅ Troubleshooting guide detallada
+- ✅ Ready para CI/CD integration
+
+---
+
 ## 📊 Estadísticas del Proyecto
 
 ### Archivos Creados/Modificados:
 ```
-Total: 64 archivos
-Líneas de código: +12,500
+Total: 72 archivos
+Líneas de código: +13,600
 Bots: 5 bots completos
 Worker: 4 casos completamente integrados (REGISTRO, LIQUIDACION, COMPROBANTE, FULL_FLOW)
 Integración: Sistema completo ULE ↔ RPA (API + Cliente + Types + Ejemplos)
-Documentación: 9,500+ líneas (incluye sistema completo + guías de integración)
+Testing: 3 suites de integration tests + utilities + documentación completa
+Documentación: 11,000+ líneas (incluye sistema completo + guías + testing)
 ```
 
 ### Cobertura de Funcionalidad:

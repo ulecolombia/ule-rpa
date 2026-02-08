@@ -77,36 +77,102 @@ export const SELECTORS = {
 
   // Liquidación PILA
   LIQUIDACION: {
+    // Navegación
+    MENU_LIQUIDAR: 'a:has-text("Liquidar PILA")',
     MENU_ITEM: 'a:has-text("Liquidar PILA")',
     MENU_ITEM_ALT: 'a[href*="liquidar"]',
+    MENU_GENERADOR: 'a[href*="generador-planillas"]',
 
+    // Selección de usuario
+    SELECT_APORTANTE: 'select[name="aportante"]',
+    BUSCAR_APORTANTE_INPUT: 'input[placeholder*="Buscar aportante"]',
     BUSCAR_APORTANTE: 'input[placeholder*="Buscar aportante"]',
     SELECCIONAR_APORTANTE: 'button:has-text("Seleccionar")',
 
+    // Opciones de liquidación
+    PLANILLA_EN_LINEA: 'button:has-text("Planilla en línea")',
+    CARGA_ARCHIVO: 'button:has-text("Carga de archivo")',
+    DUPLICAR_PLANILLA: 'button:has-text("Duplicar planilla")',
+
+    // Formulario de liquidación
     FORM: {
+      // Período
       PERIODO: 'input[name="periodo"]',
       MES: 'select[name="mes"]',
+      ANIO: 'select[name="anio"]',
       ANO: 'input[name="ano"]',
-      INGRESO_BASE: 'input[name="ingresoBase"]',
-      IBC: 'input[name="ibc"]',
+
+      // Días cotizados
       DIAS_COTIZADOS: 'input[name="diasCotizados"]',
+
+      // IBC (Ingreso Base de Cotización)
+      IBC_INPUT: 'input[name="ibc"]',
+      IBC: 'input[name="ibc"]',
+      INGRESO_BASE: 'input[name="ingresoBase"]',
+
+      // Salud (12.5%)
+      SALUD_INPUT: 'input[name="salud"]',
       SALUD: 'input[name="salud"]',
+      SALUD_PORCENTAJE: 'input[name="saludPorcentaje"]',
+
+      // Pensión (16%)
+      PENSION_INPUT: 'input[name="pension"]',
       PENSION: 'input[name="pension"]',
+      PENSION_PORCENTAJE: 'input[name="pensionPorcentaje"]',
+
+      // ARL (varía por nivel de riesgo)
+      ARL_INPUT: 'input[name="arl"]',
       ARL: 'input[name="arl"]',
+      ARL_NIVEL_RIESGO: 'select[name="nivelRiesgo"]',
       NIVEL_RIESGO_ARL: 'select[name="nivelRiesgoARL"]',
+      ARL_PORCENTAJE: 'input[name="arlPorcentaje"]',
+
+      // Total
+      TOTAL_DISPLAY: '[data-field="total"]',
       TOTAL: 'input[name="total"]',
+
+      // Acciones
       CALCULAR: 'button:has-text("Calcular")',
+      VALIDAR: 'button:has-text("Validar")',
+      CONFIRMAR: 'button:has-text("Confirmar")',
       LIQUIDAR: 'button:has-text("Liquidar")',
+      GENERAR: 'button:has-text("Generar planilla")',
       GENERAR_PLANILLA: 'button:has-text("Generar planilla")',
       CANCELAR: 'button:has-text("Cancelar")',
     },
 
+    // Resultado de liquidación
+    RESULTADO: {
+      NUMERO_PLANILLA: '[data-field="numeroPlanilla"]',
+      NUMERO_PLANILLA_ALT: 'text=/Planilla No[.:] \\d+/',
+      NUMERO_PLANILLA_DATA: '[data-planilla-numero]',
+      NUMERO_PLANILLA_CLASS: '.planilla-numero',
+      VALOR_TOTAL: '[data-field="valorTotal"]',
+      TOTAL_PAGAR: '.total-pagar',
+      FECHA_LIMITE: '[data-field="fechaLimite"]',
+      FECHA_LIMITE_CLASS: '.fecha-limite',
+      MENSAJE_EXITO: '.success, .alert-success',
+      ESTADO: '.estado-planilla',
+    },
+
+    // Resultado legacy (mantener compatibilidad)
     RESULT: {
       NUMERO_PLANILLA: '[data-planilla-numero]',
       NUMERO_PLANILLA_ALT: '.planilla-numero',
       FECHA_LIMITE: '.fecha-limite',
       TOTAL_PAGAR: '.total-pagar',
       ESTADO: '.estado-planilla',
+    },
+
+    // PSE (Pago en línea)
+    PSE: {
+      BOTON_PAGAR: 'button:has-text("Pagar")',
+      BOTON_PAGAR_PSE: 'button:has-text("Pagar con PSE")',
+      SELECCIONAR_PSE: 'input[value="PSE"]',
+      RADIO_PSE: 'input[type="radio"][value="PSE"]',
+      IFRAME_PSE: 'iframe[name="pse-iframe"]',
+      IFRAME_PAGOS: 'iframe[src*="pse"], iframe[src*="pagos"]',
+      CONTINUAR_PAGO: 'button:has-text("Continuar al pago")',
     },
   },
 
@@ -192,6 +258,7 @@ export const URL_PATTERNS = {
   LOGIN: 'https://suaporte.com.co/sso/#/login',
   DASHBOARD: 'https://suaporte.com.co/tablero/',
   APORTANTES: 'https://suaporte.com.co/gestion/#/home/administrar-aportantes',
-  LIQUIDACION: 'https://suaporte.com.co/liquidacion/',
+  LIQUIDACION: 'https://suaporte.com.co/generador-planillas/#/',
+  LIQUIDACION_ALT: 'https://suaporte.com.co/liquidacion/',
   COMPROBANTES: 'https://suaporte.com.co/comprobantes/',
 };

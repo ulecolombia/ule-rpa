@@ -30,11 +30,13 @@ export class EnlaceLiquidacionBot {
    * Liquidate PILA for a user
    * @param numeroDocumento - User document number
    * @param pilaData - PILA calculation data
+   * @param navigateToPSE - Whether to navigate to PSE payment page (default: false)
    * @returns Liquidation result with planilla number
    */
   async liquidarPila(
     numeroDocumento: string,
-    pilaData: PilaData
+    pilaData: PilaData,
+    navigateToPSE: boolean = false
   ): Promise<BotResponse<EnlaceLiquidacionResult>> {
     const startTime = Date.now();
 
@@ -42,6 +44,7 @@ export class EnlaceLiquidacionBot {
       documento: numeroDocumento,
       periodo: pilaData.periodo,
       total: pilaData.total,
+      navigateToPSE,
     });
 
     // Get authenticated page
@@ -72,10 +75,18 @@ export class EnlaceLiquidacionBot {
       logger.info('Verifying liquidation success');
       const liquidationResult = await this.verifyLiquidationSuccess(page, pilaData);
 
+      // 7. Navigate to PSE if requested (Phase 3 requirement: navigate but DON'T pay)
+      if (navigateToPSE) {
+        logger.info('Navigating to PSE payment page (STOP before payment)');
+        await this.navigateToPSEPage(page);
+        logger.info('✅ Reached PSE page - STOPPED (payment is Phase 8)');
+      }
+
       logger.info('✅ PILA liquidation completed successfully', {
         documento: numeroDocumento,
         numeroPlanilla: liquidationResult.numeroPlanilla,
         total: liquidationResult.total,
+        pseReady: navigateToPSE,
       });
 
       return {
@@ -493,29 +504,49 @@ export class EnlaceLiquidacionBot {
    */
   private async extractNumeroPlanilla(page: Page): Promise<string | undefined> {
     try {
-      // Try primary selector
-      const numeroPlanillaExists = await elementExists(page, SELECTORS.LIQUIDACION.RESULT.NUMERO_PLANILLA);
-      if (numeroPlanillaExists) {
-        const numero = await getTextContent(page, SELECTORS.LIQUIDACION.RESULT.NUMERO_PLANILLA);
-        if (numero) {
-          logger.info('Extracted numero de planilla', { numero });
-          return numero;
+      // Try new RESULTADO selectors first
+      const selectors = [
+        SELECTORS.LIQUIDACION.RESULTADO.NUMERO_PLANILLA,
+        SELECTORS.LIQUIDACION.RESULTADO.NUMERO_PLANILLA_DATA,
+        SELECTORS.LIQUIDACION.RESULTADO.NUMERO_PLANILLA_CLASS,
+        // Legacy RESULT selectors
+        SELECTORS.LIQUIDACION.RESULT.NUMERO_PLANILLA,
+        SELECTORS.LIQUIDACION.RESULT.NUMERO_PLANILLA_ALT,
+      ];
+
+      for (const selector of selectors) {
+        const exists = await elementExists(page, selector);
+        if (exists) {
+          const numero = await getTextContent(page, selector);
+          if (numero) {
+            logger.info('Extracted numero de planilla', { numero, selector });
+            return numero;
+          }
         }
       }
 
-      // Try alternative selector
-      const altExists = await elementExists(page, SELECTORS.LIQUIDACION.RESULT.NUMERO_PLANILLA_ALT);
-      if (altExists) {
-        const numero = await getTextContent(page, SELECTORS.LIQUIDACION.RESULT.NUMERO_PLANILLA_ALT);
-        if (numero) {
-          logger.info('Extracted numero de planilla (alt)', { numero });
-          return numero;
+      // Try regex selector for text pattern
+      try {
+        const element = await page.waitForSelector(SELECTORS.LIQUIDACION.RESULTADO.NUMERO_PLANILLA_ALT, {
+          timeout: 2000,
+        });
+        if (element) {
+          const numero = await element.evaluate((el) => el.textContent);
+          if (numero) {
+            const match = numero.match(/\d+/);
+            if (match) {
+              logger.info('Extracted numero de planilla from regex', { numero: match[0] });
+              return match[0];
+            }
+          }
         }
+      } catch (e) {
+        // Continue to text search
       }
 
       // Try to find in page text
       const pageText = await page.evaluate(() => document.body.innerText);
-      const planillaMatch = pageText.match(/planilla[:\s#]*(\d+)/i);
+      const planillaMatch = pageText.match(/planilla[:\s#Nn°o.]*(\d+)/i);
       if (planillaMatch) {
         logger.info('Extracted numero de planilla from text', { numero: planillaMatch[1] });
         return planillaMatch[1];
@@ -534,25 +565,134 @@ export class EnlaceLiquidacionBot {
    */
   private async extractFechaLimite(page: Page): Promise<Date | undefined> {
     try {
-      const fechaLimiteExists = await elementExists(page, SELECTORS.LIQUIDACION.RESULT.FECHA_LIMITE);
-      if (fechaLimiteExists) {
-        const fechaStr = await getTextContent(page, SELECTORS.LIQUIDACION.RESULT.FECHA_LIMITE);
-        if (fechaStr) {
-          const fecha = new Date(fechaStr);
-          if (!isNaN(fecha.getTime())) {
-            logger.info('Extracted fecha limite', { fecha });
-            return fecha;
+      // Try new RESULTADO selectors first
+      const selectors = [
+        SELECTORS.LIQUIDACION.RESULTADO.FECHA_LIMITE,
+        SELECTORS.LIQUIDACION.RESULTADO.FECHA_LIMITE_CLASS,
+        // Legacy RESULT selectors
+        SELECTORS.LIQUIDACION.RESULT.FECHA_LIMITE,
+      ];
+
+      for (const selector of selectors) {
+        const exists = await elementExists(page, selector);
+        if (exists) {
+          const fechaStr = await getTextContent(page, selector);
+          if (fechaStr) {
+            // Try to parse date in multiple formats
+            let fecha: Date | undefined;
+
+            // Try ISO format first
+            fecha = new Date(fechaStr);
+
+            // Try DD/MM/YYYY format
+            if (isNaN(fecha.getTime())) {
+              const match = fechaStr.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+              if (match) {
+                const [, day, month, year] = match;
+                fecha = new Date(`${year}-${month}-${day}`);
+              }
+            }
+
+            if (!isNaN(fecha.getTime())) {
+              logger.info('Extracted fecha limite', { fecha, selector });
+              return fecha;
+            }
           }
         }
       }
 
-      // Default: 7 days from now
+      // Default: 7 days from now (typical PILA deadline)
       const defaultFecha = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
       logger.debug('Using default fecha limite (7 days)', { fecha: defaultFecha });
       return defaultFecha;
     } catch (error) {
       logger.warn('Error extracting fecha limite', { error });
       return undefined;
+    }
+  }
+
+  /**
+   * Navigate to PSE payment page
+   * IMPORTANT: This navigates TO PSE but DOES NOT complete payment
+   * Payment completion is Phase 8 (handled by ULE application)
+   */
+  private async navigateToPSEPage(page: Page): Promise<void> {
+    try {
+      logger.info('Starting navigation to PSE page');
+      await browserManager.takeScreenshot(page, 'before-pse-navigation');
+
+      // Try different PSE button selectors
+      const pseSelectors = [
+        SELECTORS.LIQUIDACION.PSE.BOTON_PAGAR_PSE,
+        SELECTORS.LIQUIDACION.PSE.BOTON_PAGAR,
+        SELECTORS.LIQUIDACION.PSE.CONTINUAR_PAGO,
+      ];
+
+      let buttonClicked = false;
+
+      for (const selector of pseSelectors) {
+        const buttonExists = await elementExists(page, selector);
+        if (buttonExists) {
+          logger.debug('Found PSE button', { selector });
+          await scrollToElement(page, selector);
+          await randomDelay(500, 1000);
+          await waitAndClick(page, selector);
+          buttonClicked = true;
+          logger.info('Clicked PSE button');
+          break;
+        }
+      }
+
+      if (!buttonClicked) {
+        logger.warn('PSE button not found - might already be on payment page');
+        return;
+      }
+
+      // Wait for navigation/modal
+      await sleep(2000);
+      await browserManager.takeScreenshot(page, 'after-pse-button-click');
+
+      // Check if PSE radio button exists (payment method selection)
+      const pseRadioExists = await elementExists(page, SELECTORS.LIQUIDACION.PSE.SELECCIONAR_PSE);
+      const pseRadioAltExists = await elementExists(page, SELECTORS.LIQUIDACION.PSE.RADIO_PSE);
+
+      if (pseRadioExists || pseRadioAltExists) {
+        logger.debug('Selecting PSE payment method');
+        const radioSelector = pseRadioExists
+          ? SELECTORS.LIQUIDACION.PSE.SELECCIONAR_PSE
+          : SELECTORS.LIQUIDACION.PSE.RADIO_PSE;
+
+        await waitAndClick(page, radioSelector);
+        await sleep(1000);
+        await browserManager.takeScreenshot(page, 'pse-payment-method-selected');
+
+        // Click continue to PSE if button exists
+        const continuarExists = await elementExists(page, SELECTORS.LIQUIDACION.PSE.CONTINUAR_PAGO);
+        if (continuarExists) {
+          logger.debug('Clicking continue to PSE');
+          await waitAndClick(page, SELECTORS.LIQUIDACION.PSE.CONTINUAR_PAGO);
+          await sleep(2000);
+        }
+      }
+
+      // Check if PSE iframe loaded
+      const iframeExists = await elementExists(page, SELECTORS.LIQUIDACION.PSE.IFRAME_PSE);
+      const iframeAltExists = await elementExists(page, SELECTORS.LIQUIDACION.PSE.IFRAME_PAGOS);
+
+      if (iframeExists || iframeAltExists) {
+        logger.info('✅ PSE iframe detected - ready for payment');
+        await browserManager.takeScreenshot(page, 'pse-iframe-loaded');
+      } else {
+        logger.info('PSE page reached (no iframe detected yet)');
+        await browserManager.takeScreenshot(page, 'pse-page-reached');
+      }
+
+      logger.info('⏸️  STOPPED at PSE page - payment will be handled in Phase 8');
+    } catch (error) {
+      logger.error('Error navigating to PSE page', { error });
+      await browserManager.takeScreenshot(page, 'pse-navigation-error');
+      // Don't throw - PSE navigation is optional enhancement
+      logger.warn('Continuing despite PSE navigation error');
     }
   }
 }
@@ -564,10 +704,14 @@ export const enlaceLiquidacion = new EnlaceLiquidacionBot();
 
 /**
  * Quick function for liquidating PILA
+ * @param numeroDocumento - User document number
+ * @param pilaData - PILA calculation data
+ * @param navigateToPSE - Whether to navigate to PSE page (default: false)
  */
 export async function liquidarPilaEnlace(
   numeroDocumento: string,
-  pilaData: PilaData
+  pilaData: PilaData,
+  navigateToPSE: boolean = false
 ): Promise<BotResponse<EnlaceLiquidacionResult>> {
-  return enlaceLiquidacion.liquidarPila(numeroDocumento, pilaData);
+  return enlaceLiquidacion.liquidarPila(numeroDocumento, pilaData, navigateToPSE);
 }

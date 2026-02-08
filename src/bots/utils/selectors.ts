@@ -176,7 +176,54 @@ export const SELECTORS = {
     },
   },
 
-  // Comprobante
+  // Comprobantes (Fase 4)
+  COMPROBANTES: {
+    // Navegación
+    MENU_COMPROBANTES: 'a:has-text("Comprobantes")',
+    MENU_ITEM: 'a:has-text("Comprobantes")',
+
+    // Búsqueda
+    BUSCAR_INPUT: 'input[placeholder*="Buscar"]',
+    BUSCAR_PLANILLA: 'input[placeholder*="Número de planilla"]',
+    FILTRO_PERIODO: 'select[name="periodo"]',
+    BUSCAR_PERIODO: 'input[name="periodo"]',
+    FILTRO_ESTADO: 'select[name="estado"]',
+    BUSCAR_BUTTON: 'button:has-text("Buscar")',
+
+    // Resultados
+    RESULTS: {
+      TABLE: 'table.comprobantes-table',
+      TABLE_ALT: 'table',
+      ROW: 'tr[data-planilla-id]',
+      ROW_ALT: 'table tbody tr',
+      NUMERO_PLANILLA: 'td[data-field="numeroPlanilla"]',
+      NUMERO_PLANILLA_ALT: 'td:nth-child(1)',
+      FECHA_PAGO: 'td[data-field="fechaPago"]',
+      FECHA_PAGO_ALT: 'td:nth-child(2)',
+      VALOR: 'td[data-field="valor"]',
+      VALOR_ALT: 'td:nth-child(3)',
+      ESTADO: 'td[data-field="estado"]',
+      ESTADO_ALT: 'td:nth-child(4)',
+
+      // Acciones
+      BOTON_DESCARGAR: 'button:has-text("Descargar")',
+      BOTON_VER_PDF: 'button:has-text("Ver PDF")',
+      DESCARGAR_PDF: 'button:has-text("Descargar PDF")',
+      VER_COMPROBANTE: 'button:has-text("Ver comprobante")',
+      LINK_PDF: 'a[href*=".pdf"]',
+
+      NO_RESULTS: 'text="No se encontraron comprobantes"',
+      NO_RESULTS_ALT: '.no-results, .empty-state',
+    },
+
+    // Estados de planilla
+    ESTADO_PAGADA: '.estado-pagada, .badge-success',
+    ESTADO_PENDIENTE: '.estado-pendiente, .badge-warning',
+    ESTADO_RECHAZADA: '.estado-rechazada, .badge-danger',
+    ESTADO_VENCIDA: '.estado-vencida, .badge-secondary',
+  },
+
+  // COMPROBANTE (Legacy - mantener compatibilidad)
   COMPROBANTE: {
     MENU_ITEM: 'a:has-text("Comprobantes")',
     BUSCAR_PLANILLA: 'input[placeholder*="Número de planilla"]',
@@ -260,5 +307,6 @@ export const URL_PATTERNS = {
   APORTANTES: 'https://suaporte.com.co/gestion/#/home/administrar-aportantes',
   LIQUIDACION: 'https://suaporte.com.co/generador-planillas/#/',
   LIQUIDACION_ALT: 'https://suaporte.com.co/liquidacion/',
-  COMPROBANTES: 'https://suaporte.com.co/comprobantes/',
+  COMPROBANTES: 'https://suaporte.com.co/comprobantes/#/',
+  COMPROBANTES_ALT: 'https://suaporte.com.co/comprobantes/',
 };

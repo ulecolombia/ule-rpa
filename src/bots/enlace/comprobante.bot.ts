@@ -390,6 +390,545 @@ export class EnlaceComprobanteBot {
   }
 }
 
+// ============================================================================
+// FASE 4.1 - PARTE 2: VERIFICACIÓN DE ESTADO DE PLANILLA
+// ============================================================================
+
+/**
+ * Estado de una planilla PILA
+ */
+export interface PlanillaStatus {
+  numeroPlanilla: string;
+  estado: 'PAGADA' | 'PENDIENTE' | 'RECHAZADA' | 'VENCIDA';
+  fechaPago?: Date;
+  valor?: number;
+  comprobantePdfUrl?: string;
+}
+
+/**
+ * Datos extraídos de la tabla (raw)
+ */
+interface PlanillaTableData {
+  estado: string;
+  fechaPago: string | null;
+  valor: string | null;
+  pdfUrl: string | null;
+}
+
+/**
+ * Verifica el estado de una planilla PILA en Enlace Operativo
+ *
+ * @param numeroPlanilla - Número de planilla a buscar
+ * @returns Estado de la planilla (PAGADA, PENDIENTE, RECHAZADA, VENCIDA)
+ *
+ * @example
+ * const status = await verificarEstadoPlanilla('123456789');
+ * if (status.estado === 'PAGADA') {
+ *   console.log('Planilla pagada, descargar comprobante');
+ * }
+ */
+export async function verificarEstadoPlanilla(
+  numeroPlanilla: string
+): Promise<PlanillaStatus> {
+  logger.info('Checking planilla status', { numeroPlanilla });
+
+  // Obtener página autenticada
+  const page = await enlaceAuth.ensureAuthenticated();
+
+  try {
+    // 1. Navegar a comprobantes
+    logger.info('Step 1/4: Navigating to comprobantes');
+    await navegarAComprobantes(page);
+    await browserManager.takeScreenshot(page, 'comprobante-status-page');
+
+    // 2. Buscar por número de planilla
+    logger.info('Step 2/4: Searching for planilla', { numeroPlanilla });
+    await buscarPlanillaStatus(page, numeroPlanilla);
+    await browserManager.takeScreenshot(page, 'comprobante-status-search');
+
+    // 3. Verificar si hay resultados
+    const hasResults = await verificarResultados(page);
+
+    if (!hasResults) {
+      logger.info('Planilla not found in comprobantes (still PENDIENTE)', {
+        numeroPlanilla,
+      });
+      return {
+        numeroPlanilla,
+        estado: 'PENDIENTE',
+      };
+    }
+
+    // 4. Extraer datos de la tabla
+    logger.info('Step 3/4: Extracting planilla data from table');
+    const planillaData = await extraerDatosPlanilla(page, numeroPlanilla);
+
+    if (!planillaData) {
+      logger.warn('Planilla found but could not extract data', {
+        numeroPlanilla,
+      });
+      return {
+        numeroPlanilla,
+        estado: 'PENDIENTE',
+      };
+    }
+
+    // 5. Parsear y retornar estado completo
+    logger.info('Step 4/4: Parsing planilla data');
+    const planillaStatus = parsePlanillaData(numeroPlanilla, planillaData);
+
+    logger.info('Planilla status retrieved successfully', {
+      numeroPlanilla,
+      estado: planillaStatus.estado,
+      fechaPago: planillaStatus.fechaPago,
+      valor: planillaStatus.valor,
+      hasPdf: !!planillaStatus.comprobantePdfUrl,
+    });
+
+    return planillaStatus;
+  } catch (error) {
+    await browserManager.takeScreenshot(page, 'comprobante-status-error');
+    logger.error('Error checking planilla status', { numeroPlanilla, error });
+    throw new BotError(
+      `Failed to check planilla status: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+/**
+ * Navega a la página de comprobantes (helper para verificarEstadoPlanilla)
+ */
+async function navegarAComprobantes(page: Page): Promise<void> {
+  try {
+    // Estrategia 1: URL directa
+    await page.goto(URL_PATTERNS.COMPROBANTES, {
+      waitUntil: 'networkidle0',
+      timeout: 30000,
+    });
+
+    await sleep(2000);
+    logger.info('Navigated to comprobantes page');
+  } catch (error) {
+    // Estrategia 2: Click en menú
+    logger.warn('Direct navigation failed, trying menu click');
+
+    try {
+      const menuExists = await elementExists(page, SELECTORS.COMPROBANTES.MENU_COMPROBANTES);
+      if (menuExists) {
+        await waitAndClick(page, SELECTORS.COMPROBANTES.MENU_COMPROBANTES);
+        await sleep(3000);
+        logger.info('Navigated via menu click');
+      } else {
+        // Estrategia 3: URL alternativa
+        logger.warn('Menu click failed, trying alternative URL');
+        await page.goto(URL_PATTERNS.COMPROBANTES_ALT!, {
+          waitUntil: 'networkidle0',
+        });
+        await sleep(2000);
+      }
+    } catch (menuError) {
+      logger.error('All navigation strategies failed', { menuError });
+      throw menuError;
+    }
+  }
+}
+
+/**
+ * Busca una planilla por número (helper para verificarEstadoPlanilla)
+ */
+async function buscarPlanillaStatus(
+  page: Page,
+  numeroPlanilla: string
+): Promise<void> {
+  try {
+    // Estrategia 1: Input de búsqueda general
+    const searchInputExists = await elementExists(page, SELECTORS.COMPROBANTES.BUSCAR_INPUT);
+
+    if (searchInputExists) {
+      logger.info('Using general search input');
+      await waitAndType(page, SELECTORS.COMPROBANTES.BUSCAR_INPUT, numeroPlanilla, {
+        clear: true,
+        delay: 100,
+      });
+
+      // Click en buscar si hay botón
+      const searchButtonExists = await elementExists(
+        page,
+        SELECTORS.COMPROBANTES.BUSCAR_BUTTON
+      );
+      if (searchButtonExists) {
+        await waitAndClick(page, SELECTORS.COMPROBANTES.BUSCAR_BUTTON);
+      } else {
+        // Presionar Enter si no hay botón
+        await page.keyboard.press('Enter');
+      }
+
+      await sleep(3000);
+      return;
+    }
+
+    // Estrategia 2: Input específico de planilla
+    const planillaInputExists = await elementExists(
+      page,
+      SELECTORS.COMPROBANTES.BUSCAR_PLANILLA
+    );
+
+    if (planillaInputExists) {
+      logger.info('Using planilla-specific search input');
+      await waitAndType(page, SELECTORS.COMPROBANTES.BUSCAR_PLANILLA, numeroPlanilla, {
+        clear: true,
+      });
+
+      await waitAndClick(page, SELECTORS.COMPROBANTES.BUSCAR_BUTTON);
+      await sleep(3000);
+      return;
+    }
+
+    // Estrategia 3: Tabla ya cargada, buscar directamente
+    logger.info('No search input found, assuming table is already loaded');
+    await sleep(1000);
+  } catch (error) {
+    logger.warn('Error during search, continuing anyway', { error });
+  }
+}
+
+/**
+ * Verifica si hay resultados en la tabla
+ */
+async function verificarResultados(page: Page): Promise<boolean> {
+  // Verificar mensaje "No se encontraron resultados"
+  const noResults = await elementExists(page, SELECTORS.COMPROBANTES.RESULTS.NO_RESULTS);
+  if (noResults) {
+    return false;
+  }
+
+  const noResultsAlt = await elementExists(
+    page,
+    SELECTORS.COMPROBANTES.RESULTS.NO_RESULTS_ALT
+  );
+  if (noResultsAlt) {
+    return false;
+  }
+
+  // Verificar que exista tabla
+  const tableExists =
+    (await elementExists(page, SELECTORS.COMPROBANTES.RESULTS.TABLE)) ||
+    (await elementExists(page, SELECTORS.COMPROBANTES.RESULTS.TABLE_ALT));
+
+  if (!tableExists) {
+    return false;
+  }
+
+  // Verificar que la tabla tenga filas
+  const rows = await page.$$(SELECTORS.COMPROBANTES.RESULTS.ROW_ALT);
+  return rows.length > 0;
+}
+
+/**
+ * Extrae datos de la planilla de la tabla de resultados
+ * Usa múltiples estrategias para manejar diferentes formatos de tabla
+ */
+async function extraerDatosPlanilla(
+  page: Page,
+  numeroPlanilla: string
+): Promise<PlanillaTableData | null> {
+  try {
+    // Estrategia 1: Data attributes (más estable)
+    const dataByAttributes = await extraerPorDataAttributes(page, numeroPlanilla);
+    if (dataByAttributes) {
+      logger.info('Extracted data using data attributes');
+      return dataByAttributes;
+    }
+
+    // Estrategia 2: Posiciones de columnas (fallback)
+    const dataByPosition = await extraerPorPosicion(page, numeroPlanilla);
+    if (dataByPosition) {
+      logger.info('Extracted data using column positions');
+      return dataByPosition;
+    }
+
+    // Estrategia 3: Búsqueda de texto (último recurso)
+    const dataByText = await extraerPorTexto(page, numeroPlanilla);
+    if (dataByText) {
+      logger.info('Extracted data using text search');
+      return dataByText;
+    }
+
+    logger.warn('Could not extract planilla data with any strategy');
+    return null;
+  } catch (error) {
+    logger.error('Error extracting planilla data', { error });
+    return null;
+  }
+}
+
+/**
+ * Estrategia 1: Extracción por data attributes
+ */
+async function extraerPorDataAttributes(
+  page: Page,
+  numeroPlanilla: string
+): Promise<PlanillaTableData | null> {
+  return await page.evaluate((numPlanilla) => {
+    const table = document.querySelector('table');
+    if (!table) return null;
+
+    const rows = table.querySelectorAll('tbody tr');
+
+    for (const row of rows) {
+      // Buscar celda con número de planilla
+      const numeroPlanillaCell =
+        row.querySelector('[data-field="numeroPlanilla"]') ||
+        row.querySelector('[data-planilla-numero]');
+
+      if (numeroPlanillaCell?.textContent?.includes(numPlanilla)) {
+        // Extraer datos usando data attributes
+        const estadoCell = row.querySelector('[data-field="estado"]');
+        const fechaPagoCell = row.querySelector('[data-field="fechaPago"]');
+        const valorCell = row.querySelector('[data-field="valor"]');
+        const pdfLink = row.querySelector('a[href*=".pdf"]');
+        const downloadButton = row.querySelector('button:has-text("Descargar")');
+
+        return {
+          estado: estadoCell?.textContent?.trim() || '',
+          fechaPago: fechaPagoCell?.textContent?.trim() || null,
+          valor: valorCell?.textContent?.trim() || null,
+          pdfUrl:
+            pdfLink?.getAttribute('href') ||
+            downloadButton?.getAttribute('data-url') ||
+            null,
+        };
+      }
+    }
+
+    return null;
+  }, numeroPlanilla);
+}
+
+/**
+ * Estrategia 2: Extracción por posición de columnas
+ * Asume: Col 1 = Número, Col 2 = Fecha, Col 3 = Valor, Col 4 = Estado
+ */
+async function extraerPorPosicion(
+  page: Page,
+  numeroPlanilla: string
+): Promise<PlanillaTableData | null> {
+  return await page.evaluate((numPlanilla) => {
+    const table = document.querySelector('table');
+    if (!table) return null;
+
+    const rows = table.querySelectorAll('tbody tr');
+
+    for (const row of rows) {
+      const cells = row.querySelectorAll('td');
+      if (cells.length < 4) continue;
+
+      // Buscar por número de planilla en cualquier celda
+      const numeroPlanillaCell = Array.from(cells).find((cell) =>
+        cell.textContent?.includes(numPlanilla)
+      );
+
+      if (numeroPlanillaCell) {
+        // Intentar extraer por posición
+        // Formato común: Número | Fecha | Valor | Estado | Acciones
+        const estado =
+          cells[3]?.textContent?.trim() || cells[4]?.textContent?.trim() || '';
+        const fechaPago = cells[1]?.textContent?.trim() || null;
+        const valor = cells[2]?.textContent?.trim() || null;
+
+        // Buscar PDF link en la fila
+        const pdfLink = row.querySelector('a[href*=".pdf"]');
+
+        return {
+          estado,
+          fechaPago,
+          valor,
+          pdfUrl: pdfLink?.getAttribute('href') || null,
+        };
+      }
+    }
+
+    return null;
+  }, numeroPlanilla);
+}
+
+/**
+ * Estrategia 3: Extracción por búsqueda de texto
+ * Busca patrones de texto para identificar columnas
+ */
+async function extraerPorTexto(
+  page: Page,
+  numeroPlanilla: string
+): Promise<PlanillaTableData | null> {
+  return await page.evaluate((numPlanilla) => {
+    const table = document.querySelector('table');
+    if (!table) return null;
+
+    const rows = table.querySelectorAll('tbody tr');
+
+    for (const row of rows) {
+      const cells = row.querySelectorAll('td');
+
+      // Buscar celda con número de planilla
+      const numeroPlanillaCell = Array.from(cells).find((cell) =>
+        cell.textContent?.includes(numPlanilla)
+      );
+
+      if (numeroPlanillaCell) {
+        // Buscar estado por palabras clave
+        let estado = '';
+        const estadoCandidates = Array.from(cells).filter(
+          (cell) =>
+            cell.textContent?.toLowerCase().includes('pagada') ||
+            cell.textContent?.toLowerCase().includes('pendiente') ||
+            cell.textContent?.toLowerCase().includes('rechazada') ||
+            cell.textContent?.toLowerCase().includes('vencida') ||
+            cell.textContent?.toLowerCase().includes('aprobada')
+        );
+
+        if (estadoCandidates.length > 0) {
+          estado = estadoCandidates[0].textContent?.trim() || '';
+        }
+
+        // Buscar fecha (formato DD/MM/YYYY)
+        let fechaPago: string | null = null;
+        const fechaCandidates = Array.from(cells).filter((cell) =>
+          /\d{1,2}\/\d{1,2}\/\d{4}/.test(cell.textContent || '')
+        );
+
+        if (fechaCandidates.length > 0) {
+          fechaPago = fechaCandidates[0].textContent?.trim() || null;
+        }
+
+        // Buscar valor (formato con $ o números grandes)
+        let valor: string | null = null;
+        const valorCandidates = Array.from(cells).filter(
+          (cell) =>
+            cell.textContent?.includes('$') || /\d{3,}/.test(cell.textContent || '')
+        );
+
+        if (valorCandidates.length > 0) {
+          valor = valorCandidates[0].textContent?.trim() || null;
+        }
+
+        // Buscar PDF link
+        const pdfLink = row.querySelector('a[href*=".pdf"]');
+
+        return {
+          estado,
+          fechaPago,
+          valor,
+          pdfUrl: pdfLink?.getAttribute('href') || null,
+        };
+      }
+    }
+
+    return null;
+  }, numeroPlanilla);
+}
+
+/**
+ * Parsea los datos raw de la tabla y retorna un PlanillaStatus estructurado
+ */
+function parsePlanillaData(
+  numeroPlanilla: string,
+  rawData: PlanillaTableData
+): PlanillaStatus {
+  // 1. Parsear estado
+  const estado = parseEstado(rawData.estado);
+
+  // 2. Parsear fecha de pago
+  const fechaPago = parseFechaPago(rawData.fechaPago);
+
+  // 3. Parsear valor
+  const valor = parseValor(rawData.valor);
+
+  // 4. Construir resultado
+  return {
+    numeroPlanilla,
+    estado,
+    fechaPago,
+    valor,
+    comprobantePdfUrl: rawData.pdfUrl || undefined,
+  };
+}
+
+/**
+ * Parsea el estado de la planilla
+ */
+function parseEstado(estadoText: string): PlanillaStatus['estado'] {
+  const estadoLower = estadoText.toLowerCase();
+
+  if (estadoLower.includes('pagada') || estadoLower.includes('aprobada')) {
+    return 'PAGADA';
+  }
+
+  if (estadoLower.includes('rechazada') || estadoLower.includes('fallida')) {
+    return 'RECHAZADA';
+  }
+
+  if (estadoLower.includes('vencida') || estadoLower.includes('expirada')) {
+    return 'VENCIDA';
+  }
+
+  // Default: PENDIENTE
+  return 'PENDIENTE';
+}
+
+/**
+ * Parsea la fecha de pago
+ * Soporta formatos: DD/MM/YYYY, YYYY-MM-DD, DD-MM-YYYY
+ */
+function parseFechaPago(fechaText: string | null): Date | undefined {
+  if (!fechaText) return undefined;
+
+  // Formato DD/MM/YYYY (colombiano)
+  const matchDDMMYYYY = fechaText.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (matchDDMMYYYY) {
+    const [_, dia, mes, anio] = matchDDMMYYYY;
+    return new Date(parseInt(anio), parseInt(mes) - 1, parseInt(dia));
+  }
+
+  // Formato YYYY-MM-DD (ISO)
+  const matchYYYYMMDD = fechaText.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (matchYYYYMMDD) {
+    const [_, anio, mes, dia] = matchYYYYMMDD;
+    return new Date(parseInt(anio), parseInt(mes) - 1, parseInt(dia));
+  }
+
+  // Formato DD-MM-YYYY (alternativo)
+  const matchDDMMYYYY2 = fechaText.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
+  if (matchDDMMYYYY2) {
+    const [_, dia, mes, anio] = matchDDMMYYYY2;
+    return new Date(parseInt(anio), parseInt(mes) - 1, parseInt(dia));
+  }
+
+  logger.warn('Could not parse fecha pago', { fechaText });
+  return undefined;
+}
+
+/**
+ * Parsea el valor de la planilla
+ * Extrae solo números y convierte a entero
+ */
+function parseValor(valorText: string | null): number | undefined {
+  if (!valorText) return undefined;
+
+  // Extraer solo dígitos
+  const valorNumerico = valorText.replace(/\D/g, '');
+
+  if (valorNumerico.length === 0) {
+    logger.warn('Could not parse valor', { valorText });
+    return undefined;
+  }
+
+  return parseInt(valorNumerico, 10);
+}
+
+// ============================================================================
+// SINGLETON INSTANCE
+// ============================================================================
+
 /**
  * Singleton instance
  */

@@ -3,16 +3,15 @@
  * Handles browser lifecycle, configuration, and utilities
  */
 
-import puppeteer, { Browser, Page } from 'puppeteer';
+import puppeteerExtra from 'puppeteer-extra';
+import { Browser, Page } from 'puppeteer';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { addExtra } from 'puppeteer-extra';
 import { config } from '../../utils/config';
 import { logger } from '../../utils/logger';
 import path from 'path';
 import fs from 'fs/promises';
 
-// Apply stealth plugin
-const puppeteerExtra = addExtra(puppeteer);
+// Enable stealth plugin to avoid bot detection
 puppeteerExtra.use(StealthPlugin());
 
 export interface BrowserConfig {
@@ -36,31 +35,60 @@ export class BrowserManager {
 
     logger.info('Launching browser', { headless: config.puppeteer.headless });
 
-    // Create downloads directory if it doesn't exist
-    await fs.mkdir(this.downloadsPath, { recursive: true });
+    try {
+      // Create downloads directory if it doesn't exist
+      await fs.mkdir(this.downloadsPath, { recursive: true });
 
-    this.browser = await puppeteerExtra.launch({
-      headless: this.browserConfig.headless ?? config.puppeteer.headless,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu',
-        '--window-size=1920,1080',
-      ],
-      defaultViewport: {
-        width: 1920,
-        height: 1080,
-      },
-      ...(this.browserConfig.userDataDir && {
-        userDataDir: this.browserConfig.userDataDir,
-      }),
-    });
+      logger.debug('Launching puppeteer...');
 
-    logger.info('Browser launched successfully');
+      const isHeadless = this.browserConfig.headless ?? config.puppeteer.headless;
 
-    return this.browser;
+      this.browser = await puppeteerExtra.launch({
+        headless: isHeadless,
+        // Use system Chrome for non-headless mode (fixes socket hang up issue on macOS)
+        ...(isHeadless === false && { channel: 'chrome' }),
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--window-size=1920,1080',
+        ],
+        defaultViewport: {
+          width: 1920,
+          height: 1080,
+        },
+        ...(this.browserConfig.userDataDir && {
+          userDataDir: this.browserConfig.userDataDir,
+        }),
+      });
+
+      logger.info('Browser launched successfully');
+
+      return this.browser;
+    } catch (error) {
+      // Log the full error details
+      let errorMessage = 'Unknown error';
+      let errorStack = undefined;
+
+      if (error instanceof Error) {
+        errorMessage = error.message;
+        errorStack = error.stack;
+      } else if (typeof error === 'object' && error !== null) {
+        errorMessage = JSON.stringify(error, null, 2);
+      } else {
+        errorMessage = String(error);
+      }
+
+      logger.error('Failed to launch browser', {
+        error: errorMessage,
+        stack: errorStack,
+        errorType: typeof error,
+        errorConstructor: error?.constructor?.name,
+      });
+      throw new Error(`Browser launch failed: ${errorMessage}`);
+    }
   }
 
   async newPage(): Promise<Page> {
@@ -75,6 +103,42 @@ export class BrowserManager {
     // Set extra headers
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'es-CO,es;q=0.9,en;q=0.8',
+    });
+
+    // Anti-detection: Remove webdriver property and other bot signals
+    await page.evaluateOnNewDocument(() => {
+      // Remove webdriver property
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+      });
+
+      // Override languages
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['es-CO', 'es', 'en-US', 'en'],
+      });
+
+      // Override plugins to look more real
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+          { name: 'Native Client', filename: 'internal-nacl-plugin' },
+        ],
+      });
+
+      // Override permissions
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters: PermissionDescriptor) =>
+        parameters.name === 'notifications'
+          ? Promise.resolve({ state: 'denied', onchange: null } as PermissionStatus)
+          : originalQuery(parameters);
+
+      // Add chrome object if missing
+      if (!(window as unknown as Record<string, unknown>).chrome) {
+        (window as unknown as Record<string, unknown>).chrome = {
+          runtime: {},
+        };
+      }
     });
 
     // Configure downloads
@@ -124,7 +188,7 @@ export async function createBrowser(): Promise<Browser> {
   return browserManager.launch();
 }
 
-export async function createPage(browser: Browser): Promise<Page> {
+export async function createPage(_browser: Browser): Promise<Page> {
   return browserManager.newPage();
 }
 

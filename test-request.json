@@ -1,0 +1,13 @@
+{
+  "uleUserId": "test-user-123",
+  "userData": {
+    "tipoDocumento": "CC",
+    "numeroDocumento": "123456789",
+    "nombre": "Test Usuario",
+    "email": "test@example.com",
+    "telefono": "3001234567",
+    "eps": "SANITAS",
+    "pension": "PORVENIR",
+    "arl": "SURA"
+  }
+}

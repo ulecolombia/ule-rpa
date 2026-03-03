@@ -73,7 +73,7 @@ taskQueue.on('error', (error) => {
 });
 
 taskQueue.on('waiting', (jobId) => {
-  logger.debug(`Job ${jobId.jobId} is waiting in queue`);
+  logger.debug(`Job ${(jobId as any).jobId || jobId} is waiting in queue`);
 });
 
 taskQueue.on('cleaned', (jobs, type) => {
@@ -96,12 +96,11 @@ export async function addRegistroTask(data: TaskInput): Promise<Job> {
     data,
     {
       priority: data.priority || 5,
-      timeout: 5 * 60 * 1000, // 5 minutes
       jobId: `registro-${data.uleUserId}-${Date.now()}`,
       removeOnComplete: {
         age: 7 * 24 * 3600,
       },
-    }
+    } as any // timeout manejado en worker
   );
 }
 
@@ -122,9 +121,8 @@ export async function addLiquidacionTask(data: TaskInput): Promise<Job> {
     data,
     {
       priority: data.priority || 3, // Higher priority for liquidation
-      timeout: 10 * 60 * 1000, // 10 minutes
       jobId: `liquidacion-${data.uleUserId}-${data.paymentId}-${Date.now()}`,
-    }
+    } as any
   );
 }
 
@@ -145,9 +143,8 @@ export async function addComprobanteTask(data: TaskInput): Promise<Job> {
     data,
     {
       priority: data.priority || 7,
-      timeout: 5 * 60 * 1000, // 5 minutos
       jobId: `comprobante-${data.numeroPlanilla}-${Date.now()}`,
-    }
+    } as any
   );
 }
 
@@ -167,9 +164,37 @@ export async function addFullFlowTask(data: TaskInput): Promise<Job> {
     data,
     {
       priority: data.priority || 2, // Very high priority
-      timeout: 15 * 60 * 1000, // 15 minutes
       jobId: `full-flow-${data.uleUserId}-${Date.now()}`,
-    }
+    } as any
+  );
+}
+
+/**
+ * Add ACTIVACION task to queue
+ * Used after registering a user in SOI to activate their account via email link
+ * @param data - Task input data (requires uleUserId and userData with documento)
+ * @returns Job instance
+ */
+export async function addActivacionTask(data: TaskInput): Promise<Job> {
+  logger.info('Adding ACTIVACION task to queue', {
+    userId: data.uleUserId,
+    documento: data.userData?.numeroDocumento,
+    priority: data.priority,
+  });
+
+  return taskQueue.add(
+    'activacion',
+    data,
+    {
+      priority: data.priority || 6,
+      jobId: `activacion-${data.uleUserId}-${Date.now()}`,
+      // Retry with longer delays since email might take time to arrive
+      attempts: 5,
+      backoff: {
+        type: 'exponential',
+        delay: 30000, // 30s, 60s, 120s, 240s, 480s
+      },
+    } as any
   );
 }
 
@@ -190,21 +215,22 @@ export async function addTaskToQueue(
 ): Promise<Job> {
   logger.info('Adding task to queue', { taskType, userId: data.uleUserId });
 
-  const defaultTimeout = {
+  // Timeout manejado en el worker
+  const _defaultTimeout = {
     REGISTRO: 5 * 60 * 1000,
     LIQUIDACION: 10 * 60 * 1000,
     COMPROBANTE: 5 * 60 * 1000,
     FULL_FLOW: 15 * 60 * 1000,
   }[taskType] || 5 * 60 * 1000;
+  void _defaultTimeout;
 
   return taskQueue.add(
     taskType.toLowerCase(),
     data,
     {
       priority: options?.priority || data.priority || 5,
-      timeout: options?.timeout || defaultTimeout,
       jobId: options?.jobId || `${taskType.toLowerCase()}-${data.uleUserId}-${Date.now()}`,
-    }
+    } as any
   );
 }
 

@@ -1,5 +1,24 @@
 export * from './task.types';
 export * from './user.types';
+export * from './soi.types';
+// Re-export soi-planilla.types excluyendo TipoDocumento (ya exportado de soi.types)
+export {
+  type TipoCotizante,
+  type SubTipoCotizante,
+  type TipoNovedad,
+  type SOICotizante,
+  type SOIPlanillaLiquidacion,
+  type SOIAportante,
+  type SOINovedades,
+  type SOISeguridadSocial,
+  type SOIParafiscales,
+  type SOIPago,
+  SOI_DEFAULTS_INDEPENDIENTE,
+  SALARIO_MINIMO_2026,
+  IBC_MINIMO_INDEPENDIENTE,
+  SOI_SELECTORS_PASO3,
+} from './soi-planilla.types';
+export * from './pago-admin.types';
 
 /**
  * User data from ULE
@@ -17,6 +36,11 @@ export interface UserData {
   eps: string;
   pension: string;
   arl: string;
+  // Campos adicionales para registro
+  departamento?: string;
+  municipio?: string;
+  celular?: string;
+  correo?: string;
 }
 
 /**
@@ -39,14 +63,19 @@ export interface PilaData {
  * Task input for creating new RPA tasks
  */
 export interface TaskInput {
-  type: 'REGISTRO' | 'LIQUIDACION' | 'COMPROBANTE' | 'FULL_FLOW';
+  type: 'REGISTRO' | 'LIQUIDACION' | 'COMPROBANTE' | 'FULL_FLOW' | 'PAGO_PSE' | 'PAGO_SOI' | 'SOI_LIQUIDACION_COMPLETA' | 'ACTIVACION';
   uleUserId: string;
   enlaceUserId?: string;
   userData?: UserData;
   pilaData?: PilaData;
   paymentId?: string;
-  numeroPlanilla?: string; // Required for COMPROBANTE tasks
+  numeroPlanilla?: string; // Required for COMPROBANTE and PAGO_SOI tasks
+  planillaId?: string; // Required for COMPROBANTE tasks
+  valorTotal?: number; // Required for PAGO_SOI tasks
+  banco?: string; // Bank for PSE payment (optional - uses default)
   priority?: number;
+  parentTaskId?: string; // For linking child tasks to parent (e.g., COMPROBANTE to PSE)
+  planillaData?: import('./soi-planilla.types').SOIPlanillaLiquidacion; // For SOI_LIQUIDACION_COMPLETA
 }
 
 /**

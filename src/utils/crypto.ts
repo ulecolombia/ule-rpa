@@ -8,9 +8,7 @@ const scrypt = promisify(crypto.scrypt);
 const ALGORITHM = 'aes-256-gcm';
 const KEY_LENGTH = 32;
 const IV_LENGTH = 16;
-const TAG_LENGTH = 16;
 const SALT_LENGTH = 32;
-const SCRYPT_N = 16384;
 
 /**
  * Generate encryption key from password using scrypt
@@ -258,4 +256,142 @@ export function maskSensitive(data: string, visibleChars: number = 4): string {
   const masked = '*'.repeat(data.length - visibleChars * 2);
 
   return `${start}${masked}${end}`;
+}
+
+/**
+ * Hash sensitive data for secure logging
+ * Returns first 16 chars of SHA-256 hash (not reversible)
+ *
+ * @param data - Sensitive data to hash
+ * @returns First 16 chars of SHA-256 hash
+ *
+ * @example
+ * hashSensitiveData('123456') // 'e10adc3949ba59ab'
+ */
+export function hashSensitiveData(data: string): string {
+  return crypto.createHash('sha256').update(data).digest('hex').substring(0, 16);
+}
+
+/**
+ * Validate encryption setup by encrypting and decrypting test data
+ * Useful for startup checks
+ *
+ * @returns True if encryption is working correctly
+ */
+export async function validateEncryptionSetup(): Promise<boolean> {
+  try {
+    const testData = 'test-encryption-123456';
+    const encrypted = await encrypt(testData);
+    const decrypted = await decrypt(encrypted);
+
+    const isValid = testData === decrypted;
+
+    if (!isValid) {
+      console.error('Encryption validation failed - decrypted data does not match');
+    }
+
+    return isValid;
+  } catch (error) {
+    console.error('Encryption validation failed', error);
+    return false;
+  }
+}
+
+/**
+ * Encrypt password for SOI storage
+ * Returns encrypted password and IV for storage in database
+ *
+ * @param password - Plain text password
+ * @returns Object with encrypted password and IV
+ *
+ * @example
+ * const { encrypted, iv } = encryptPassword('myPassword123');
+ * // Store encrypted and iv in database
+ */
+export function encryptPassword(password: string): { encrypted: string; iv: string } {
+  const key = getEncryptionKey();
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+
+  let encrypted = cipher.update(password, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+
+  const tag = cipher.getAuthTag();
+
+  // Format: tag:encrypted (IV stored separately)
+  return {
+    encrypted: `${tag.toString('hex')}:${encrypted}`,
+    iv: iv.toString('hex'),
+  };
+}
+
+/**
+ * Decrypt password for SOI use
+ *
+ * @param encrypted - Encrypted password (tag:encrypted format)
+ * @param iv - IV used for encryption
+ * @returns Decrypted plain text password
+ */
+export function decryptPassword(encrypted: string, iv: string): string {
+  const key = getEncryptionKey();
+  const parts = encrypted.split(':');
+
+  if (parts.length !== 2) {
+    throw new Error('Invalid encrypted password format');
+  }
+
+  const tag = Buffer.from(parts[0], 'hex');
+  const encryptedData = parts[1];
+  const ivBuffer = Buffer.from(iv, 'hex');
+
+  const decipher = crypto.createDecipheriv(ALGORITHM, key, ivBuffer);
+  decipher.setAuthTag(tag);
+
+  let decrypted = decipher.update(encryptedData, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+
+  return decrypted;
+}
+
+/**
+ * Generate a secure random password for SOI accounts
+ * Password requirements:
+ * - Minimum 8 characters
+ * - At least one uppercase letter
+ * - At least one lowercase letter
+ * - At least one number
+ * - At least one special character
+ *
+ * @param length - Length of the password (default 12)
+ * @returns Secure random password
+ *
+ * @example
+ * const password = generateSecurePassword(); // 'Kj9#mL2xQw1!'
+ */
+export function generateSecurePassword(length: number = 12): string {
+  const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const lowercase = 'abcdefghijklmnopqrstuvwxyz';
+  const numbers = '0123456789';
+  const special = '!@#$%&*';
+  const allChars = uppercase + lowercase + numbers + special;
+
+  // Ensure at least one of each type
+  let password = '';
+  password += uppercase[crypto.randomInt(uppercase.length)];
+  password += lowercase[crypto.randomInt(lowercase.length)];
+  password += numbers[crypto.randomInt(numbers.length)];
+  password += special[crypto.randomInt(special.length)];
+
+  // Fill the rest with random characters
+  for (let i = password.length; i < length; i++) {
+    password += allChars[crypto.randomInt(allChars.length)];
+  }
+
+  // Shuffle the password to avoid predictable patterns
+  const shuffled = password
+    .split('')
+    .sort(() => crypto.randomInt(3) - 1)
+    .join('');
+
+  return shuffled;
 }

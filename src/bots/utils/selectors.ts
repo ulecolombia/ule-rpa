@@ -6,16 +6,41 @@
 export const SELECTORS = {
   // Login page
   LOGIN: {
-    TIPO_DOC_SELECT: 'select[name="tipoDocumento"]',
-    NUMERO_DOC_INPUT: 'input[name="numeroDocumento"]',
-    PASSWORD_INPUT: 'input[name="password"]',
+    // Selectores más flexibles para Enlace Operativo
+    TIPO_DOC_SELECT: 'select, [role="listbox"], mat-select, .mat-select, [class*="select"]',
+    NUMERO_DOC_INPUT: 'input[type="text"], input[type="number"], input[placeholder*="identificación"], input[placeholder*="documento"], input:not([type="hidden"]):not([type="checkbox"])',
+    PASSWORD_INPUT: 'input[name="password"], input[type="password"]',
     USER_INPUT: 'input[name="usuario"]',
-    RECAPTCHA: '.g-recaptcha',
-    RECAPTCHA_CHECKBOX: 'iframe[src*="recaptcha"]',
-    CONTINUAR_BUTTON: 'button:has-text("Continuar")',
-    INGRESAR_BUTTON: 'button[type="submit"]',
-    ERROR_MESSAGE: '.alert-danger, .error-message',
+    RECAPTCHA: '.g-recaptcha, [class*="recaptcha"], iframe[src*="recaptcha"]',
+    RECAPTCHA_CHECKBOX: 'iframe[src*="recaptcha"], .recaptcha-checkbox',
+    CONTINUAR_BUTTON: 'button[type="submit"], button:has-text("Continuar"), button:has-text("CONTINUAR"), .btn-primary',
+    INGRESAR_BUTTON: 'button[type="submit"], button:has-text("Ingresar")',
+    ERROR_MESSAGE: '.alert-danger, .error-message, [class*="error"], [class*="alert"]',
     SUCCESS_MESSAGE: '.alert-success',
+
+    // ========================================
+    // TECLADO VIRTUAL (Pantalla de clave)
+    // ========================================
+    VIRTUAL_KEYBOARD: {
+      // Contenedor del teclado
+      CONTAINER: '.teclado-virtual, .virtual-keyboard, [class*="keyboard"], [class*="teclado"]',
+      // Campo de clave (readonly)
+      CLAVE_INPUT: 'input[name="clave"], input[type="password"]',
+      // Botones numéricos - buscaremos todos y leeremos su texto
+      DIGIT_BUTTONS: 'button.digit, button.numero, button[data-digit], .teclado button, .keyboard button, button:not([disabled]):not(:has-text("Borrar")):not(:has-text("Cancelar")):not(:has-text("Ingresar"))',
+      // Botón específico por número (se construye dinámicamente)
+      DIGIT_BUTTON_BY_TEXT: (digit: string) => `button:has-text("${digit}")`,
+      // Botón Borrar
+      BORRAR_BUTTON: 'button:has-text("Borrar")',
+      // Botón Cancelar
+      CANCELAR_BUTTON: 'button:has-text("Cancelar")',
+      // Botón Ingresar (submit)
+      INGRESAR_BUTTON: 'button:has-text("Ingresar")',
+      // Mensaje "Utiliza el teclado virtual"
+      INSTRUCTION_TEXT: 'text=/[Uu]tiliza el teclado virtual/',
+      // Olvidé mi clave link
+      OLVIDE_CLAVE: 'a:has-text("Olvidé mi clave")',
+    },
   },
 
   // Dashboard
@@ -273,6 +298,53 @@ export const SELECTORS = {
     CONFIGURACION: 'a[href*="configuracion"]',
     LOGOUT: 'button:has-text("Cerrar sesión")',
     LOGOUT_ALT: 'a:has-text("Salir")',
+  },
+
+  // ========================================
+  // SELECTORES PSE - FASE 6.1
+  // ========================================
+  PSE: {
+    // Selección de banco
+    BANCO_SELECT: 'select[name*="banco"], select[id*="banco"]',
+    BANCO_BANCOLOMBIA_OPTION: 'option[value*="Bancolombia"], option:contains("Bancolombia")',
+    BANCO_BANCOLOMBIA_BUTTON:
+      '//button[contains(text(), "Bancolombia")] | //a[contains(text(), "Bancolombia")] | //div[contains(@class, "banco")][contains(text(), "Bancolombia")]',
+
+    // Datos de cuenta
+    TIPO_PERSONA_SELECT: 'select[name*="tipoPersona"], select[id*="tipoPersona"]',
+    TIPO_PERSONA_NATURAL: 'option[value="N"], option[value="Natural"]',
+
+    TIPO_CUENTA_SELECT:
+      'select[name*="tipoCuenta"], select[id*="tipoCuenta"], select[name*="tipo_cuenta"]',
+    TIPO_CUENTA_AHORROS: 'option[value="A"], option[value="Ahorros"], option:contains("Ahorros")',
+    TIPO_CUENTA_CORRIENTE:
+      'option[value="C"], option[value="Corriente"], option:contains("Corriente")',
+
+    NUMERO_CUENTA_INPUT:
+      'input[name*="cuenta"], input[name*="numeroCuenta"], input[name*="numero_cuenta"], input[id*="cuenta"]',
+
+    TIPO_DOCUMENTO_SELECT:
+      'select[name*="tipoDocumento"], select[id*="tipoDocumento"], select[name*="tipo_documento"]',
+    TIPO_DOCUMENTO_CC: 'option[value="CC"], option[value="Cédula"]',
+
+    NUMERO_DOCUMENTO_INPUT:
+      'input[name*="documento"], input[name*="numeroDocumento"], input[name*="numero_documento"], input[id*="documento"]',
+
+    // Botones de navegación
+    CONTINUAR_BUTTON:
+      '//button[contains(text(), "Continuar")] | //button[contains(text(), "CONTINUAR")] | //button[contains(text(), "Siguiente")] | //input[@type="submit"][@value="Continuar"]',
+    PAGAR_BUTTON:
+      '//button[contains(text(), "Pagar")] | //button[contains(text(), "PAGAR")] | //input[@type="submit"][@value="Pagar"]',
+
+    // Detección de clave dinámica
+    CLAVE_DINAMICA_INPUT:
+      'input[name*="clave"], input[name*="token"], input[name*="codigo"], input[placeholder*="código"], input[placeholder*="clave"]',
+    CLAVE_DINAMICA_TEXT:
+      'clave dinámica, código de seguridad, token, ingrese el código, código de verificación, clave temporal',
+
+    // Confirmación final
+    CONFIRMAR_BUTTON:
+      '//button[contains(text(), "Confirmar")] | //button[contains(text(), "Aceptar")] | //button[contains(text(), "OK")]',
   },
 };
 

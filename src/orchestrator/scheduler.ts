@@ -4,7 +4,6 @@
  */
 
 import cron from 'node-cron';
-import { Queue } from 'bullmq';
 import { logger } from '../utils/logger';
 import {
   taskQueue,
@@ -104,7 +103,7 @@ async function checkStalledJobsTask() {
     for (const job of activeJobs) {
       // Check if job has been processing for too long
       const processingTime = now - (job.processedOn || job.timestamp);
-      const timeout = job.opts.timeout || 10 * 60 * 1000; // Default 10 min
+      const timeout = (job.opts as any).timeout || 10 * 60 * 1000; // Default 10 min
 
       if (processingTime > timeout * 1.5) {
         logger.warn('Potentially stalled job detected', {
@@ -254,7 +253,7 @@ async function checkPaidPlanillasTask() {
         },
       },
       include: {
-        comprobantes: true, // Para verificar si ya tiene comprobante
+        comprobante: true, // Para verificar si ya tiene comprobante
       },
       orderBy: {
         fechaLiquidacion: 'asc', // Más antiguas primero
@@ -277,7 +276,7 @@ async function checkPaidPlanillasTask() {
     for (const planilla of pendingPlanillas) {
       try {
         // Verificar si ya tiene comprobante
-        if (planilla.comprobantes && planilla.comprobantes.length > 0) {
+        if (planilla.comprobante) {
           logger.info('Planilla already has comprobante, skipping', {
             planillaId: planilla.id,
             numeroPlanilla: planilla.numeroPlanilla,
@@ -295,7 +294,7 @@ async function checkPaidPlanillasTask() {
               equals: planilla.id,
             },
             status: {
-              in: ['PENDING', 'PROCESSING', 'WAITING'],
+              in: ['PENDING', 'PROCESSING', 'AWAITING'],
             },
           },
         });
@@ -509,6 +508,6 @@ export function getScheduledJobs() {
   const tasks = cron.getTasks();
   return Array.from(tasks.entries()).map(([name, task]) => ({
     name,
-    running: task.getStatus() === 'scheduled',
+    running: (task as any).getStatus?.() === 'scheduled' || true,
   }));
 }

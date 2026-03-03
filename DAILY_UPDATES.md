@@ -10,6 +10,56 @@ Log de actualizaciones diarias del proyecto ULE RPA Service.
 
 ---
 
+## Update: 2026-02-08 (Actualización PM)
+
+### Estado Actual:
+- **Fase 2**: Bot System Implementation - ✅ COMPLETADA
+- **Fase 3**: Liquidación PILA - ✅ COMPLETADA (75% → 100%)
+- **Fase 4**: Descarga de Comprobantes - ✅ COMPLETADA
+- **Siguiente Fase**: FASE 5 - Dashboard Admin / Monitoring
+- **Commits Hoy**: 6+
+
+### Trabajo Realizado - Fase 4 COMPLETA:
+
+#### Subfase 4.1: Verificación de Estado de Planilla ✅
+- `verificarEstadoPlanilla(numeroPlanilla)` - Consulta estado en Enlace
+- 3 estrategias de extracción de datos de tabla
+- Estados soportados: PAGADA, PENDIENTE, RECHAZADA, VENCIDA
+- Extracción de fecha pago, valor, URL de PDF
+
+#### Subfase 4.2: Descarga de Comprobante PDF ✅
+- `descargarComprobante(numeroPlanilla, outputDir?)` - Descarga PDF
+- Configuración de download via CDP
+- Espera inteligente de descarga con timeout
+- Verificación de PDF válido (header %PDF)
+- Renombre automático con timestamp
+
+#### Subfase 4.3: StorageUploader Multi-Backend ✅
+- `StorageUploader` class con soporte para:
+  - Local storage (desarrollo)
+  - Vercel Blob (producción)
+  - AWS S3 (alternativa)
+- Estructura organizada: `comprobantes/{userId}/pila/{año}/{mes}/`
+- Cleanup automático de archivos locales
+- Helper function `uploadComprobanteToStorage()`
+
+#### Subfase 4.4: Scheduler de Verificación Automática ✅
+- Cron job cada 2 horas: `0 */2 * * *`
+- `checkPaidPlanillasTask()` - Revisa planillas pendientes
+- Crea tareas COMPROBANTE automáticamente
+- Evita duplicados (verifica tareas existentes)
+- Procesa máximo 20 planillas por corrida
+
+#### Archivos Fase 4:
+- `src/bots/enlace/comprobante.bot.ts` (1,266 líneas)
+- `src/storage/uploader.ts` (419 líneas)
+- `src/storage/local.ts` (87 líneas)
+- `src/orchestrator/scheduler.ts` (515 líneas)
+- `tests/manual/test-comprobante.ts` (nuevo)
+- `docs/FASE-4-COMPROBANTES.md` (nuevo)
+
+---
+
 ## Update: 2026-02-08
 
 ### Estado Actual:

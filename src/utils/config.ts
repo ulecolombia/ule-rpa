@@ -25,7 +25,7 @@ const envSchema = z.object({
   // Enlace Operativo (Admin Account)
   ENLACE_BASE_URL: z.string().url('ENLACE_BASE_URL must be a valid URL'),
   ENLACE_ADMIN_DOC: z.string().min(1, 'ENLACE_ADMIN_DOC is required'),
-  ENLACE_ADMIN_USER: z.string().min(1, 'ENLACE_ADMIN_USER is required'),
+  ENLACE_ADMIN_USER: z.string().optional().default(''), // Not used - Enlace uses doc + password only
   ENLACE_ADMIN_PASS: z.string().min(1, 'ENLACE_ADMIN_PASS is required'),
 
   // ULE API
@@ -55,6 +55,27 @@ const envSchema = z.object({
 
   // Encryption (for sensitive data)
   ENCRYPTION_KEY: z.string().optional(),
+
+  // PSE Session Encryption (required for Fase 6)
+  ENCRYPTION_SECRET: z
+    .string()
+    .min(32, 'ENCRYPTION_SECRET must be at least 32 characters')
+    .optional(),
+
+  // Bancolombia PSE Configuration (Fase 6)
+  BANCOLOMBIA_CUENTA_NUMERO: z.string().optional(),
+  BANCOLOMBIA_CUENTA_TIPO: z.enum(['Ahorros', 'Corriente']).default('Ahorros'),
+  BANCOLOMBIA_TITULAR_DOCUMENTO: z.string().optional(),
+
+  // SOI Configuration (New operator - no CAPTCHA)
+  SOI_EMPRESA_TIPO_DOC: z.string().default('CC'),
+  SOI_EMPRESA_NUMERO_DOC: z.string().optional(),
+  SOI_USUARIO_TIPO_DOC: z.string().default('CC'),
+  SOI_USUARIO_NUMERO_DOC: z.string().optional(),
+  SOI_PASSWORD: z.string().optional(),
+
+  // Operator Selection
+  PILA_OPERATOR: z.enum(['enlace', 'soi']).default('soi'),
 });
 
 /**
@@ -156,7 +177,29 @@ export const config = {
   // Encryption
   encryption: {
     key: env.ENCRYPTION_KEY || 'default-key-please-change-in-production',
+    secret: env.ENCRYPTION_SECRET || env.ENCRYPTION_KEY || 'default-secret-change-in-production-32chars',
   },
+
+  // Bancolombia PSE (Fase 6)
+  bancolombia: {
+    cuentaNumero: env.BANCOLOMBIA_CUENTA_NUMERO,
+    cuentaTipo: env.BANCOLOMBIA_CUENTA_TIPO,
+    titularDocumento: env.BANCOLOMBIA_TITULAR_DOCUMENTO,
+  },
+
+  // SOI (New operator - no CAPTCHA)
+  soi: {
+    admin: {
+      empresaTipoDoc: env.SOI_EMPRESA_TIPO_DOC,
+      empresaNumeroDoc: env.SOI_EMPRESA_NUMERO_DOC || '',
+      usuarioTipoDoc: env.SOI_USUARIO_TIPO_DOC,
+      usuarioNumeroDoc: env.SOI_USUARIO_NUMERO_DOC || '',
+      password: env.SOI_PASSWORD || '',
+    },
+  },
+
+  // Operator Selection
+  pilaOperator: env.PILA_OPERATOR,
 } as const;
 
 /**

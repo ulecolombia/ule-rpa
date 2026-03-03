@@ -7,13 +7,39 @@ import { Worker, Job } from 'bullmq';
 import { PrismaClient } from '@prisma/client';
 import { redisConnection, moveToDeadLetter } from './queue.config';
 import { logger, createChildLogger } from '../utils/logger';
+// config removed - pilaOperator no longer used after Enlace removal
 import { TaskInput, TaskResult } from '../types';
-import { registrarUsuario } from '../bots/enlace/registro.bot';
-import { liquidarPilaConConfirmacion } from '../bots/enlace/liquidacion.bot';
-import { descargarComprobanteEnlace } from '../bots/enlace/comprobante.bot';
-import { verificarEstadoPlanilla, descargarComprobante } from '../bots/enlace/comprobante.bot';
-import { uploadComprobanteToStorage } from '../storage/uploader';
+
+// SOI imports (only supported operator)
+import {
+  registrarUsuarioSOI,
+  pagarPlanillaSOI,
+  SOIUserData,
+  SOIPagoData,
+  // Nuevo bot de crear planilla con IBC
+  SOIAuthBot,
+  SOICrearPlanillaBot,
+} from '../bots/soi';
+import type { SOIPlanillaLiquidacion } from '../types/soi-planilla.types';
+import { decryptPassword } from '../utils/crypto';
+
+// Storage uploader - available for future use
+// import { uploadComprobanteToStorage } from '../storage/uploader';
 import { startScheduler, stopScheduler } from './scheduler';
+import {
+  emitTaskUpdate,
+  emitTaskCompleted,
+  emitTaskFailed,
+  emitLog,
+  emitPlanillaUpdate,
+  emitQueueUpdate,
+} from '../api/websocket';
+import { getQueueStats } from './queue.config';
+import {
+  notificarLiquidacionCreada,
+  notificarLiquidacionEnProgreso,
+  notificarLiquidacionFallida,
+} from '../services/ule-notifier';
 
 const prisma = new PrismaClient();
 
@@ -37,6 +63,9 @@ async function logTaskProgress(
         screenshot,
       },
     });
+
+    // Emit log via WebSocket for real-time updates
+    emitLog(taskId, { level, message, details });
   } catch (error) {
     logger.error('Failed to log task progress', { taskId, error });
   }
@@ -63,7 +92,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
       where: { id: job.id as string },
       create: {
         id: job.id as string,
-        type: job.data.type,
+        type: job.data.type as any, // TaskType extendido
         status: 'PROCESSING',
         uleUserId: job.data.uleUserId,
         enlaceUserId: job.data.enlaceUserId,
@@ -82,6 +111,14 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
     });
 
     await logTaskProgress(task.id, 'INFO', `Task processing started - Attempt ${job.attemptsMade + 1}`);
+
+    // Emit task started via WebSocket
+    emitTaskUpdate(task.id, {
+      status: 'PROCESSING',
+      type: job.data.type,
+      userId: job.data.uleUserId,
+      message: `Processing ${job.data.type} task`,
+    });
   } catch (error) {
     jobLogger.error('Failed to create/update task in database', { error });
     throw error;
@@ -105,20 +142,56 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           throw new Error('userData is required for REGISTRO task');
         }
 
+        // SOI is the only supported operator
+        const pilaOperator = 'soi';
+        jobLogger.info('Using PILA operator: SOI');
+
         // Log de inicio
-        await logTaskProgress(task.id, 'INFO', 'Starting user registration', {
+        await logTaskProgress(task.id, 'INFO', 'Starting user registration via SOI', {
           documento: userData.numeroDocumento,
           nombre: userData.nombre,
+          operator: pilaOperator,
         });
 
-        // Ejecutar bot de registro (nueva función)
-        const registroResult = await registrarUsuario(userData);
+        let registroResult: {
+          success: boolean;
+          enlaceUserId?: string;
+          alreadyExists?: boolean;
+          warnings?: string[];
+          error?: string;
+        };
+
+        // === SOI Registration (sin reCAPTCHA) ===
+        const soiUserData: SOIUserData = {
+          tipoDocumento: userData.tipoDocumento || 'CC',
+          numeroDocumento: userData.numeroDocumento,
+          nombres: userData.nombre?.split(' ')[0] || userData.nombre,
+          apellidos: userData.nombre?.split(' ').slice(1).join(' ') || '',
+          departamento: userData.departamento || 'BOGOTA D.C.',
+          municipio: userData.municipio || 'BOGOTA D.C.',
+          telefono: userData.telefono,
+          celular: userData.celular,
+          correo: userData.correo || userData.email,
+          enviarSMS: true,
+          rolSOI: 'APORTANTE',
+          activo: true,
+        };
+
+        const soiResult = await registrarUsuarioSOI(soiUserData);
+
+        registroResult = {
+          success: soiResult.success,
+          enlaceUserId: soiResult.usuarioId,
+          alreadyExists: soiResult.alreadyExists,
+          warnings: soiResult.warnings,
+          error: soiResult.error,
+        };
 
         if (!registroResult.success) {
           throw new Error(registroResult.error || 'Registration failed');
         }
 
-        // Guardar usuario en tabla EnlaceUser
+        // Guardar usuario en tabla EnlaceUser (mantener compatibilidad)
         const enlaceUser = await prisma.enlaceUser.upsert({
           where: { uleUserId },
           create: {
@@ -150,12 +223,13 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           task.id,
           'INFO',
           registroResult.alreadyExists
-            ? 'User already existed in Enlace'
-            : 'User registered successfully',
+            ? `User already existed in ${pilaOperator.toUpperCase()}`
+            : `User registered successfully in ${pilaOperator.toUpperCase()}`,
           {
             enlaceUserId: registroResult.enlaceUserId,
             alreadyExists: registroResult.alreadyExists,
             warnings: registroResult.warnings,
+            operator: pilaOperator,
           }
         );
 
@@ -173,6 +247,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
             alreadyExists: registroResult.alreadyExists,
             warnings: registroResult.warnings,
             enlaceUserRecordId: enlaceUser.id,
+            operator: pilaOperator,
           },
           duration: Date.now() - startTime,
         };
@@ -180,238 +255,93 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
       }
 
       case 'LIQUIDACION': {
-        const { uleUserId, pilaData, paymentId } = job.data;
-
-        if (!pilaData) {
-          throw new Error('pilaData is required for LIQUIDACION task');
-        }
-
-        // Obtener usuario de Enlace
-        const enlaceUser = await prisma.enlaceUser.findUnique({
-          where: { uleUserId },
-        });
-
-        if (!enlaceUser || enlaceUser.enlaceStatus !== 'REGISTERED') {
-          throw new Error('User not registered in Enlace');
-        }
-
-        // Log de inicio
-        await logTaskProgress(task.id, 'INFO', 'Starting PILA liquidation', {
-          documento: enlaceUser.numeroDocumento,
-          periodo: pilaData.periodo,
-          total: pilaData.total,
-        });
-
-        // Ejecutar liquidación con confirmación completa
-        const liquidacionResult = await liquidarPilaConConfirmacion(
-          enlaceUser.numeroDocumento,
-          pilaData
-        );
-
-        if (!liquidacionResult.success) {
-          throw new Error(liquidacionResult.error || 'Liquidation failed');
-        }
-
-        // Guardar planilla en DB
-        const planilla = await prisma.pilaPlanilla.create({
-          data: {
-            uleUserId,
-            enlaceUserId: enlaceUser.id,
-            taskId: task.id,
-            paymentId: paymentId || '',
-
-            numeroPlanilla: liquidacionResult.numeroPlanilla!,
-            periodo: pilaData.periodo,
-
-            ingresoBase: pilaData.ingresoBase,
-            ibc: pilaData.ibc,
-            salud: pilaData.salud,
-            pension: pilaData.pension,
-            arl: pilaData.arl,
-            total: pilaData.total,
-
-            estadoPago: 'PENDIENTE',
-            fechaLiquidacion: new Date(),
-            fechaLimite:
-              liquidacionResult.fechaLimite || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-          },
-        });
-
-        // Actualizar tarea a AWAITING (esperando pago PSE)
-        await prisma.task.update({
-          where: { id: task.id },
-          data: {
-            status: 'AWAITING',
-            resultData: {
-              numeroPlanilla: liquidacionResult.numeroPlanilla,
-              planillaId: planilla.id,
-              urlPSE: liquidacionResult.urlPSE,
-            } as any,
-          },
-        });
-
-        // Log de éxito
-        await logTaskProgress(task.id, 'INFO', 'PILA liquidated successfully - awaiting PSE payment', {
-          numeroPlanilla: liquidacionResult.numeroPlanilla,
-          planillaId: planilla.id,
-        });
-
-        // Log warnings if any
-        if (liquidacionResult.warnings && liquidacionResult.warnings.length > 0) {
-          await logTaskProgress(task.id, 'WARN', 'Liquidation completed with warnings', {
-            warnings: liquidacionResult.warnings,
-          });
-        }
-
-        result = {
-          success: true,
-          data: {
-            numeroPlanilla: liquidacionResult.numeroPlanilla,
-            planillaId: planilla.id,
-            estadoPago: 'PENDIENTE',
-          },
-          duration: Date.now() - startTime,
-        };
-
-        break;
+        // DEPRECATED: Use SOI_LIQUIDACION_COMPLETA instead
+        throw new Error('LIQUIDACION task type is deprecated. Use SOI_LIQUIDACION_COMPLETA instead.');
       }
 
       case 'COMPROBANTE': {
-        const { numeroPlanilla, planillaId } = job.data;
+        // DEPRECATED: Comprobante download via Enlace is no longer supported
+        throw new Error('COMPROBANTE task type is deprecated. Use SOI comprobante flow instead.');
+      }
 
-        if (!numeroPlanilla || !planillaId) {
-          throw new Error('numeroPlanilla and planillaId required for COMPROBANTE task');
-        }
+      case 'FULL_FLOW': {
+        // DEPRECATED: Use SOI_LIQUIDACION_COMPLETA instead
+        throw new Error('FULL_FLOW task type is deprecated. Use SOI_LIQUIDACION_COMPLETA instead.');
+      }
 
-        // Obtener datos de planilla
-        const planilla = await prisma.pilaPlanilla.findUnique({
-          where: { id: planillaId },
-          include: { enlaceUser: true },
-        });
+      case 'PAGO_SOI': {
+        // Pago de planilla SOI vía PSE
+        const { numeroPlanilla, valorTotal, planillaId, banco } = job.data;
 
-        if (!planilla) {
-          throw new Error(`Planilla not found: ${planillaId}`);
+        if (!numeroPlanilla || !valorTotal) {
+          throw new Error('numeroPlanilla and valorTotal required for PAGO_SOI task');
         }
 
         // Log inicio
-        await logTaskProgress(task.id, 'INFO', 'Checking planilla payment status', {
+        await logTaskProgress(task.id, 'INFO', 'Starting SOI payment via PSE', {
           numeroPlanilla,
-          planillaId,
+          valorTotal,
+          banco: banco || 'DEFAULT',
         });
 
-        // 1. Verificar estado
-        const status = await verificarEstadoPlanilla(numeroPlanilla);
+        // Preparar datos de pago
+        const pagoData: SOIPagoData = {
+          numeroPlanilla,
+          valorTotal,
+          pse: banco ? { banco } : undefined,
+        };
 
-        if (status.estado !== 'PAGADA') {
-          jobLogger.info('Planilla not paid yet', {
-            numeroPlanilla,
-            estado: status.estado,
+        // Ejecutar pago
+        const pagoResult = await pagarPlanillaSOI(pagoData);
+
+        if (!pagoResult.success) {
+          await logTaskProgress(task.id, 'ERROR', 'SOI payment failed', {
+            error: pagoResult.error,
+            estadoPago: pagoResult.estadoPago,
           });
+          throw new Error(pagoResult.message || 'Payment failed');
+        }
 
-          // Actualizar estado si cambió
-          if (status.estado === 'RECHAZADA' || status.estado === 'VENCIDA') {
+        // Log estado actual
+        await logTaskProgress(task.id, 'INFO', 'SOI payment initiated', {
+          estadoPago: pagoResult.estadoPago,
+          transaccionId: pagoResult.transaccionId,
+          awaitingBankRedirect: pagoResult.awaitingBankRedirect,
+        });
+
+        // Si el pago está en proceso (esperando banco)
+        if (pagoResult.awaitingBankRedirect) {
+          // Actualizar planilla si existe
+          if (planillaId) {
             await prisma.pilaPlanilla.update({
               where: { id: planillaId },
-              data: { estadoPago: status.estado },
+              data: {
+                estadoPago: 'EN_PROCESO',
+              },
             });
 
-            await logTaskProgress(task.id, 'WARN', `Planilla status changed to ${status.estado}`, {
+            emitPlanillaUpdate(planillaId, {
               numeroPlanilla,
-              estado: status.estado,
+              estadoPago: 'EN_PROCESO',
+              userId: job.data.uleUserId,
             });
           }
 
-          throw new Error(`Planilla not paid: ${status.estado}`);
+          // Emitir notificación de PSE en proceso
+          emitTaskUpdate(task.id, {
+            status: 'PROCESSING',
+            message: 'Redirecting to bank for payment',
+          } as any);
         }
-
-        // 2. Descargar comprobante
-        await logTaskProgress(task.id, 'INFO', 'Planilla is paid, downloading comprobante PDF', {
-          numeroPlanilla,
-          fechaPago: status.fechaPago,
-          valor: status.valor,
-        });
-
-        const downloadResult = await descargarComprobante(numeroPlanilla);
-
-        if (!downloadResult.success || !downloadResult.localPath) {
-          throw new Error(downloadResult.error || 'Download failed');
-        }
-
-        await logTaskProgress(task.id, 'INFO', 'Comprobante downloaded successfully', {
-          localPath: downloadResult.localPath,
-          fileName: downloadResult.fileName,
-          fileSize: downloadResult.fileSize,
-        });
-
-        // 3. Subir a storage de ULE
-        await logTaskProgress(task.id, 'INFO', 'Uploading comprobante to storage', {
-          localPath: downloadResult.localPath,
-        });
-
-        const uploadResult = await uploadComprobanteToStorage(
-          downloadResult.localPath,
-          {
-            userId: planilla.uleUserId,
-            numeroPlanilla,
-            periodo: planilla.periodo,
-            valor: planilla.total,
-            fechaPago: status.fechaPago || new Date(),
-          },
-          false // Don't cleanup yet - will do manually after DB save
-        );
-
-        if (!uploadResult.success || !uploadResult.url) {
-          throw new Error(uploadResult.error || 'Upload failed');
-        }
-
-        await logTaskProgress(task.id, 'INFO', 'Comprobante uploaded to storage', {
-          url: uploadResult.url,
-          publicId: uploadResult.publicId,
-        });
-
-        // 4. Guardar comprobante en DB
-        const comprobante = await prisma.comprobante.create({
-          data: {
-            planillaId,
-            uleUserId: planilla.uleUserId,
-            fileName: downloadResult.fileName!,
-            filePath: uploadResult.publicId!,
-            fileUrl: uploadResult.url,
-            fileSize: downloadResult.fileSize!,
-            downloadedAt: new Date(),
-            uploadedToUle: true,
-            uploadedAt: new Date(),
-          },
-        });
-
-        // 5. Actualizar planilla como pagada
-        await prisma.pilaPlanilla.update({
-          where: { id: planillaId },
-          data: {
-            estadoPago: 'PAGADA',
-            fechaPago: status.fechaPago || new Date(),
-          },
-        });
-
-        // 6. Limpiar archivo local
-        const { storageUploader } = await import('../storage/uploader');
-        await storageUploader.cleanupLocalFile(downloadResult.localPath);
-
-        // Log éxito
-        await logTaskProgress(task.id, 'INFO', 'Comprobante processed successfully', {
-          comprobanteId: comprobante.id,
-          fileUrl: uploadResult.url,
-          estadoPago: 'PAGADA',
-        });
 
         result = {
           success: true,
           data: {
-            comprobanteId: comprobante.id,
-            fileUrl: uploadResult.url,
-            fileName: downloadResult.fileName,
-            fileSize: downloadResult.fileSize,
-            estadoPago: 'PAGADA',
+            numeroPlanilla,
+            estadoPago: pagoResult.estadoPago,
+            transaccionId: pagoResult.transaccionId,
+            urlBanco: pagoResult.urlBanco,
+            awaitingBankRedirect: pagoResult.awaitingBankRedirect,
           },
           duration: Date.now() - startTime,
         };
@@ -419,99 +349,201 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
         break;
       }
 
-      case 'FULL_FLOW': {
-        // Execute full flow: registro + liquidacion
-        if (!job.data.userData || !job.data.pilaData) {
-          throw new Error('userData and pilaData are required for FULL_FLOW task');
+      // ============================================================================
+      // SOI_LIQUIDACION_COMPLETA - Nuevo flujo con datos IBC completos
+      // ============================================================================
+      case 'SOI_LIQUIDACION_COMPLETA': {
+        const { planillaData, uleUserId } = job.data as {
+          planillaData: SOIPlanillaLiquidacion;
+          uleUserId: string;
+        };
+
+        if (!planillaData) {
+          throw new Error('planillaData required for SOI_LIQUIDACION_COMPLETA');
         }
 
-        await logTaskProgress(task.id, 'INFO', 'Starting FULL_FLOW: Registration phase');
-
-        // Phase 1: Registration (using new function)
-        const registroResult = await registrarUsuario(job.data.userData);
-
-        if (!registroResult.success) {
-          throw new Error(`Registration failed: ${registroResult.error}`);
-        }
-
-        // Save/update EnlaceUser
-        await prisma.enlaceUser.upsert({
-          where: { uleUserId: job.data.uleUserId },
-          create: {
-            uleUserId: job.data.uleUserId,
-            tipoDocumento: job.data.userData.tipoDocumento,
-            numeroDocumento: job.data.userData.numeroDocumento,
-            nombre: job.data.userData.nombre,
-            eps: job.data.userData.eps,
-            pension: job.data.userData.pension,
-            arl: job.data.userData.arl,
-            enlaceUserId: registroResult.enlaceUserId,
-            enlaceStatus: 'REGISTERED',
-            registeredAt: new Date(),
-            lastSyncAt: new Date(),
-          },
-          update: {
-            enlaceUserId: registroResult.enlaceUserId,
-            enlaceStatus: 'REGISTERED',
-            lastSyncAt: new Date(),
-          },
+        await logTaskProgress(task.id, 'INFO', 'Starting SOI planilla liquidation (complete flow)', {
+          userId: uleUserId,
+          periodo: `${planillaData.periodo.mes}/${planillaData.periodo.anio}`,
+          cotizantes: planillaData.cotizantes.length,
         });
 
-        await logTaskProgress(task.id, 'INFO', 'Registration completed, starting liquidation');
+        // 1. Obtener credenciales y hacer login
+        const soiAuthBot = new SOIAuthBot();
 
-        // Phase 2: Liquidation (using new complete flow)
-        const liquidacionResult = await liquidarPilaConConfirmacion(
-          job.data.userData.numeroDocumento,
-          job.data.pilaData
-        );
+        // Desencriptar password si viene encriptada
+        let soiPassword: string;
+        if ((planillaData as any).soiPasswordEncrypted && (planillaData as any).soiPasswordIV) {
+          soiPassword = decryptPassword(
+            (planillaData as any).soiPasswordEncrypted,
+            (planillaData as any).soiPasswordIV
+          );
+        } else if ((planillaData as any).soiPassword) {
+          soiPassword = (planillaData as any).soiPassword;
+        } else {
+          throw new Error('No se encontró password de SOI');
+        }
+
+        const cotizantePrincipal = planillaData.cotizantes[0];
+        const credentials = {
+          tipoDocumento: cotizantePrincipal.identificacion.tipoDocumento as any,
+          documento: cotizantePrincipal.identificacion.numeroDocumento,
+          password: soiPassword,
+        };
+
+        await logTaskProgress(task.id, 'INFO', 'Logging in to SOI', {
+          documento: credentials.documento,
+        });
+
+        await soiAuthBot.loginAsUser(credentials);
+        const page = soiAuthBot.getPage();
+
+        if (!page) {
+          throw new Error('No se pudo obtener página después del login');
+        }
+
+        await logTaskProgress(task.id, 'INFO', 'SOI login successful, creating planilla');
+
+        // Notificar progreso a ULE
+        await notificarLiquidacionEnProgreso(uleUserId, {
+          taskId: task.id,
+          step: 'creando_planilla',
+          progress: 30,
+        });
+
+        // 2. Crear planilla usando el nuevo bot
+        const crearPlanillaBot = new SOICrearPlanillaBot(page, {
+          takeScreenshots: true,
+          screenshotPrefix: `soi-${uleUserId}-${Date.now()}`,
+        });
+
+        const liquidacionResult = await crearPlanillaBot.crearPlanilla(planillaData);
 
         if (!liquidacionResult.success) {
-          throw new Error(`Liquidation failed: ${liquidacionResult.error}`);
+          // Notificar fallo a ULE
+          await notificarLiquidacionFallida(uleUserId, {
+            error: liquidacionResult.error || 'Liquidación falló',
+            taskId: task.id,
+            step: 'crear_planilla',
+            periodo: `${planillaData.periodo.mes}/${planillaData.periodo.anio}`,
+          });
+          await soiAuthBot.close();
+          throw new Error(liquidacionResult.error || 'Liquidación falló');
         }
 
-        // Save planilla if liquidation succeeded
-        const enlaceUser = await prisma.enlaceUser.findUnique({
-          where: { uleUserId: job.data.uleUserId },
+        await logTaskProgress(task.id, 'INFO', 'Planilla created successfully', {
+          numeroPlanilla: liquidacionResult.numeroPlanilla,
+          valorTotal: liquidacionResult.valorTotal,
         });
 
-        if (enlaceUser) {
-          await prisma.pilaPlanilla.create({
-            data: {
-              uleUserId: job.data.uleUserId,
-              enlaceUserId: enlaceUser.id,
-              taskId: task.id,
-              paymentId: job.data.paymentId || '',
-              numeroPlanilla: liquidacionResult.numeroPlanilla!,
-              periodo: job.data.pilaData.periodo,
-              ingresoBase: job.data.pilaData.ingresoBase,
-              ibc: job.data.pilaData.ibc,
-              salud: job.data.pilaData.salud,
-              pension: job.data.pilaData.pension,
-              arl: job.data.pilaData.arl,
-              total: job.data.pilaData.total,
-              estadoPago: 'PENDIENTE',
-              fechaLiquidacion: new Date(),
-              fechaLimite:
-                liquidacionResult.fechaLimite || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-            },
-          });
-        }
+        // 3. Guardar en DB
+        const planilla = await prisma.pilaPlanilla.create({
+          data: {
+            uleUserId,
+            enlaceUserId: job.data.enlaceUserId || '',
+            taskId: task.id,
+            paymentId: job.data.paymentId || '',
+            numeroPlanilla: liquidacionResult.numeroPlanilla || '',
+            periodo: `${planillaData.periodo.mes}/${planillaData.periodo.anio}`,
+            ingresoBase: cotizantePrincipal.seguridadSocial.salarioBasico,
+            ibc: cotizantePrincipal.seguridadSocial.pension.ibc,
+            salud: liquidacionResult.desglose?.salud || 0,
+            pension: liquidacionResult.desglose?.pension || 0,
+            arl: liquidacionResult.desglose?.arl || 0,
+            total: liquidacionResult.valorTotal || 0,
+            estadoPago: 'PENDIENTE',
+            fechaLiquidacion: new Date(),
+            fechaLimite: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          },
+        });
 
-        await logTaskProgress(task.id, 'INFO', 'FULL_FLOW completed successfully');
+        // 4. Emit WebSocket
+        emitPlanillaUpdate(planilla.id, {
+          numeroPlanilla: liquidacionResult.numeroPlanilla!,
+          estadoPago: 'PENDIENTE',
+          userId: uleUserId,
+        } as any);
+
+        // 5. Notificar a ULE via Webhook
+        await notificarLiquidacionCreada(uleUserId, {
+          numeroPlanilla: liquidacionResult.numeroPlanilla || '',
+          periodo: `${planillaData.periodo.mes}/${planillaData.periodo.anio}`,
+          valorTotal: liquidacionResult.valorTotal || 0,
+          valorSalud: liquidacionResult.desglose?.salud || 0,
+          valorPension: liquidacionResult.desglose?.pension || 0,
+          valorArl: liquidacionResult.desglose?.arl || 0,
+          planillaId: planilla.id,
+        });
+
+        emitTaskUpdate(task.id, {
+          status: 'COMPLETED',
+          type: 'SOI_LIQUIDACION_COMPLETA',
+          message: 'Planilla liquidada exitosamente',
+        } as any);
+
+        // 6. Cerrar sesión
+        await soiAuthBot.close();
+
+        jobLogger.info('SOI_LIQUIDACION_COMPLETA completed', {
+          planillaId: planilla.id,
+          numeroPlanilla: liquidacionResult.numeroPlanilla,
+        });
 
         result = {
           success: true,
           data: {
-            registro: {
-              enlaceUserId: registroResult.enlaceUserId,
-              alreadyExists: registroResult.alreadyExists,
-              warnings: registroResult.warnings,
-            },
-            liquidacion: {
-              numeroPlanilla: liquidacionResult.numeroPlanilla,
-              fechaLimite: liquidacionResult.fechaLimite,
-              urlPSE: liquidacionResult.urlPSE,
-            },
+            planillaId: planilla.id,
+            numeroPlanilla: liquidacionResult.numeroPlanilla,
+            valorTotal: liquidacionResult.valorTotal,
+            desglose: liquidacionResult.desglose,
+          },
+          duration: Date.now() - startTime,
+        };
+
+        break;
+      }
+
+      case 'ACTIVACION': {
+        const { userData } = job.data;
+
+        if (!userData?.numeroDocumento) {
+          throw new Error('userData.numeroDocumento is required for ACTIVACION task');
+        }
+
+        await logTaskProgress(task.id, 'INFO', 'Starting SOI account activation', {
+          documento: userData.numeroDocumento,
+          nombre: userData.nombre,
+        });
+
+        // Import the activation service dynamically to avoid circular dependencies
+        const { getSOIAccountActivationService } = await import('../services/soi-account-activation.service');
+        const activationService = getSOIAccountActivationService();
+
+        const activationResult = await activationService.processActivation({
+          documento: userData.numeroDocumento,
+          tipoDocumento: userData.tipoDocumento || 'CC',
+          nombreCompleto: userData.nombre,
+        });
+
+        if (!activationResult.success) {
+          // If email not found, it might not have arrived yet - throw to trigger retry
+          if (activationResult.error === 'EMAIL_NOT_FOUND') {
+            throw new Error('Activation email not found yet - will retry');
+          }
+          throw new Error(activationResult.error || activationResult.message);
+        }
+
+        await logTaskProgress(task.id, 'INFO', 'Account activated successfully', {
+          documento: userData.numeroDocumento,
+          message: activationResult.message,
+        });
+
+        result = {
+          success: true,
+          data: {
+            documento: userData.numeroDocumento,
+            activated: true,
+            message: activationResult.message,
           },
           duration: Date.now() - startTime,
         };
@@ -538,6 +570,14 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
 
     await logTaskProgress(task.id, 'INFO', 'Task completed successfully', {
       duration: result.duration,
+    });
+
+    // Emit task completed via WebSocket
+    emitTaskCompleted(task.id, {
+      type: job.data.type,
+      result: result.data as Record<string, unknown>,
+      duration: result.duration,
+      userId: job.data.uleUserId,
     });
 
     jobLogger.info('Task completed successfully', {
@@ -590,6 +630,22 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           totalAttempts: job.attemptsMade + 1,
         }
       );
+
+      // Emit task failed via WebSocket
+      emitTaskFailed(task.id, errorMessage, {
+        type: job.data.type,
+        userId: job.data.uleUserId,
+        attempts: job.attemptsMade + 1,
+        willRetry: false,
+      });
+    } else {
+      // Emit retry notification
+      emitTaskUpdate(task.id, {
+        status: 'PENDING',
+        type: job.data.type,
+        userId: job.data.uleUserId,
+        message: `Retry scheduled (attempt ${job.attemptsMade + 1}/3)`,
+      });
     }
 
     // Move to dead letter queue if max attempts reached
@@ -614,21 +670,37 @@ export const taskWorker = new Worker<TaskInput>('ule-rpa-tasks', processTask, {
 });
 
 // Event listeners
-taskWorker.on('completed', (job) => {
+taskWorker.on('completed', async (job) => {
   logger.info('Job completed', {
     jobId: job.id,
     type: job.data.type,
     returnValue: job.returnvalue,
   });
+
+  // Emit queue update via WebSocket
+  try {
+    const stats = await getQueueStats();
+    emitQueueUpdate(stats);
+  } catch (error) {
+    logger.error('Failed to emit queue update', { error });
+  }
 });
 
-taskWorker.on('failed', (job, err) => {
+taskWorker.on('failed', async (job, err) => {
   logger.error('Job failed', {
     jobId: job?.id,
     type: job?.data?.type,
     error: err.message,
     attempt: job?.attemptsMade,
   });
+
+  // Emit queue update via WebSocket
+  try {
+    const stats = await getQueueStats();
+    emitQueueUpdate(stats);
+  } catch (error) {
+    logger.error('Failed to emit queue update', { error });
+  }
 });
 
 taskWorker.on('error', (err) => {

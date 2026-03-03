@@ -10,84 +10,153 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Usuarios de ULE registrados en Enlace
+// Usuarios de ULE registrados en Enlace/SOI
 model EnlaceUser {
-  id        String   @id @default(cuid())
+  id String @id @default(cuid())
 
   // Referencia a usuario de ULE
-  uleUserId String   @unique
+  uleUserId String @unique
 
   // Datos de identificación
-  tipoDocumento     String  // CC, CE, PEP
-  numeroDocumento   String  @unique
-  nombre            String
+  tipoDocumento   String // CC, CE, NIT, PA, TI
+  numeroDocumento String @unique
+  nombre          String
+  apellidos       String?
 
-  // Datos de Enlace
-  enlaceUserId      String?  // ID interno de Enlace (si existe)
-  enlaceStatus      EnlaceUserStatus @default(PENDING)
+  // Ubicación (requeridos para SOI)
+  departamento String?
+  municipio    String?
+
+  // Contacto
+  email    String?
+  telefono String?
+  celular  String?
+
+  // Datos de Enlace (legacy)
+  enlaceUserId String? // ID interno de Enlace (si existe)
+  enlaceStatus EnlaceUserStatus @default(PENDING)
+
+  // ════════════════════════════════════════════════════════════
+  // OPERADOR DE PILA
+  // ════════════════════════════════════════════════════════════
+
+  // Operador donde está registrado el usuario (SOI o Mi Planilla)
+  operador OperadorPila @default(SOI)
+
+  // ════════════════════════════════════════════════════════════
+  // CAMPOS SOI
+  // ════════════════════════════════════════════════════════════
+
+  // Estado de cuenta SOI
+  soiAccountStatus SOIAccountStatus @default(NOT_LINKED)
+
+  // Password SOI (ENCRIPTADO con AES-256)
+  soiPassword   String? // Password encriptado
+  soiPasswordIV String? // IV para desencriptar
+
+  // Fechas SOI
+  soiLinkedAt    DateTime? // Cuando se vinculó/creó cuenta SOI
+  soiLastLoginAt DateTime? // Último login exitoso en SOI
+
+  // ════════════════════════════════════════════════════════════
+  // CAMPOS MI PLANILLA
+  // ════════════════════════════════════════════════════════════
+
+  // Usuario Mi Planilla (formato: CC + documento, ej: CC1047484978)
+  miplanillaUser String?
+
+  // Password Mi Planilla (ENCRIPTADO con AES-256)
+  miplanillaPassword   String? // Password encriptado
+  miplanillaPasswordIV String? // IV para desencriptar
+
+  // Fechas Mi Planilla
+  miplanillaLinkedAt    DateTime? // Cuando se creó cuenta Mi Planilla
+  miplanillaLastLoginAt DateTime? // Último login exitoso
+
+  // ════════════════════════════════════════════════════════════
 
   // Entidades de seguridad social
-  eps               String?
-  pension           String?
-  arl               String?
+  eps     String?
+  pension String?
+  arl     String?
 
   // Metadata
-  registeredAt      DateTime?
-  lastSyncAt        DateTime?
+  registeredAt DateTime?
+  lastSyncAt   DateTime?
 
   // Relaciones
-  tasks             Task[]
-  planillas         PilaPlanilla[]
+  tasks     Task[]
+  planillas PilaPlanilla[]
 
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([uleUserId])
   @@index([numeroDocumento])
+  @@index([soiAccountStatus])
+  @@index([operador])
 }
 
 enum EnlaceUserStatus {
-  PENDING           // Esperando registro en Enlace
-  REGISTERING       // Bot está registrando
-  REGISTERED        // Registrado exitosamente
-  ERROR             // Error en registro
+  PENDING // Esperando registro en Enlace
+  REGISTERING // Bot está registrando
+  REGISTERED // Registrado exitosamente
+  ERROR // Error en registro
+}
+
+// Estado de cuenta SOI del usuario
+enum SOIAccountStatus {
+  NOT_LINKED         // Usuario no ha vinculado cuenta SOI
+  PENDING_CREATION   // Pendiente crear cuenta en SOI
+  CREATING           // Bot creando cuenta
+  ACTIVE             // Cuenta activa y vinculada
+  CREDENTIALS_ERROR  // Credenciales inválidas
+  BLOCKED            // Cuenta bloqueada en SOI
+}
+
+// Operador de PILA (SOI o Mi Planilla)
+enum OperadorPila {
+  SOI          // Operador SOI (nuevosoi.com.co)
+  MI_PLANILLA  // Operador Mi Planilla (miplanilla.com)
 }
 
 // Tareas del RPA
 model Task {
-  id          String     @id @default(cuid())
+  id String @id @default(cuid())
 
-  type        TaskType
-  status      TaskStatus @default(PENDING)
-  priority    Int        @default(5)
+  type     TaskType
+  status   TaskStatus @default(PENDING)
+  priority Int        @default(5)
 
   // Referencias
-  uleUserId   String
-  enlaceUser  EnlaceUser? @relation(fields: [enlaceUserId], references: [id])
+  uleUserId    String
+  enlaceUser   EnlaceUser? @relation(fields: [enlaceUserId], references: [id])
   enlaceUserId String?
 
-  paymentId   String?    // ID del pago en ULE (si aplica)
+  paymentId String? // ID del pago en ULE (si aplica)
 
   // Datos de entrada (JSON flexible)
-  inputData   Json
+  inputData Json
 
   // Resultado de la tarea
-  resultData  Json?
-  error       String?
+  resultData Json?
+  error      String?
 
   // Métricas
-  attempts    Int        @default(0)
-  maxAttempts Int        @default(3)
+  attempts    Int @default(0)
+  maxAttempts Int @default(3)
 
   startedAt   DateTime?
   completedAt DateTime?
   failedAt    DateTime?
 
   // Relaciones
-  logs        TaskLog[]
+  logs              TaskLog[]
+  pseSessions       PseSession[] // Sesiones PSE asociadas
+  pagoAdminSessions PagoAdminSession[] // Sesiones pago admin (Fase 6)
 
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([type, status])
   @@index([uleUserId])
@@ -95,58 +164,65 @@ model Task {
 }
 
 enum TaskType {
-  REGISTRO      // Registrar usuario en Enlace
-  LIQUIDACION   // Liquidar planilla de PILA
-  COMPROBANTE   // Descargar comprobante
-  FULL_FLOW     // Flujo completo (registro + liquidación)
+  REGISTRO // Registrar usuario en Enlace
+  LIQUIDACION // Liquidar planilla de PILA
+  COMPROBANTE // Descargar comprobante
+  FULL_FLOW // Flujo completo (registro + liquidación)
+  PAGO_PSE // Pago por PSE (Fase 6)
 }
 
 enum TaskStatus {
-  PENDING       // En cola
-  PROCESSING    // Ejecutándose
-  COMPLETED     // Completada exitosamente
-  FAILED        // Falló después de reintentos
-  CANCELLED     // Cancelada manualmente
-  AWAITING      // Esperando acción externa (ej: pago PSE)
+  PENDING // En cola
+  PROCESSING // Ejecutándose
+  COMPLETED // Completada exitosamente
+  FAILED // Falló después de reintentos
+  CANCELLED // Cancelada manualmente
+  AWAITING // Esperando acción externa (ej: pago PSE)
 }
 
 // Planillas de PILA liquidadas
 model PilaPlanilla {
-  id              String   @id @default(cuid())
+  id String @id @default(cuid())
 
   // Referencias
-  uleUserId       String
-  enlaceUser      EnlaceUser @relation(fields: [enlaceUserId], references: [id])
-  enlaceUserId    String
+  uleUserId    String
+  enlaceUser   EnlaceUser @relation(fields: [enlaceUserId], references: [id])
+  enlaceUserId String
 
-  taskId          String   // Task que la creó
-  paymentId       String   // Pago en ULE
+  taskId    String // Task que la creó
+  paymentId String // Pago en ULE
 
   // Datos de la planilla
-  numeroPlanilla  String   @unique
-  periodo         String   // "2026-02"
+  numeroPlanilla String @unique
+  periodo        String // "2026-02"
 
   // Montos
-  ingresoBase     Int
-  ibc             Int
-  salud           Int
-  pension         Int
-  arl             Int
-  total           Int
+  ingresoBase Int
+  ibc         Int
+  salud       Int
+  pension     Int
+  arl         Int
+  total       Int
 
   // Estado
-  estadoPago      PagoStatus @default(PENDIENTE)
+  estadoPago PagoStatus @default(PENDIENTE)
 
   // Fechas
-  fechaLiquidacion DateTime @default(now())
+  fechaLiquidacion DateTime  @default(now())
   fechaLimite      DateTime
   fechaPago        DateTime?
 
   // Comprobante
-  comprobante      Comprobante?
+  comprobante Comprobante?
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  // Sesiones PSE
+  pseSessions PseSession[]
+
+  // Sesiones de pago admin-controlled (Fase 6)
+  pagoAdminSessions PagoAdminSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([uleUserId, periodo])
   @@index([numeroPlanilla])
@@ -154,50 +230,50 @@ model PilaPlanilla {
 }
 
 enum PagoStatus {
-  PENDIENTE       // Liquidada, esperando pago
-  EN_PROCESO      // Pagando (PSE en curso)
-  PAGADA          // Pago confirmado
-  RECHAZADA       // Pago rechazado
-  VENCIDA         // Pasó fecha límite
+  PENDIENTE // Liquidada, esperando pago
+  EN_PROCESO // Pagando (PSE en curso)
+  PAGADA // Pago confirmado
+  RECHAZADA // Pago rechazado
+  VENCIDA // Pasó fecha límite
 }
 
 // Comprobantes descargados
 model Comprobante {
-  id            String   @id @default(cuid())
+  id String @id @default(cuid())
 
   // Referencias
-  planilla      PilaPlanilla @relation(fields: [planillaId], references: [id])
-  planillaId    String   @unique
+  planilla   PilaPlanilla @relation(fields: [planillaId], references: [id])
+  planillaId String       @unique
 
-  uleUserId     String
+  uleUserId String
 
   // Archivo
-  fileName      String
-  filePath      String
-  fileUrl       String?  // URL pública si aplica
-  fileSize      Int
-  mimeType      String   @default("application/pdf")
+  fileName String
+  filePath String
+  fileUrl  String? // URL pública si aplica
+  fileSize Int
+  mimeType String  @default("application/pdf")
 
   // Metadata
-  downloadedAt  DateTime @default(now())
-  uploadedToUle Boolean  @default(false)
+  downloadedAt  DateTime  @default(now())
+  uploadedToUle Boolean   @default(false)
   uploadedAt    DateTime?
 
-  createdAt     DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([uleUserId])
 }
 
 // Logs detallados de tareas
 model TaskLog {
-  id        String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  taskId    String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId String
 
-  level     LogLevel
-  message   String
-  details   Json?
+  level   LogLevel
+  message String
+  details Json?
 
   // Screenshots en caso de error
   screenshot String?
@@ -217,21 +293,166 @@ enum LogLevel {
 
 // Sesiones de bot (para reutilizar)
 model BotSession {
-  id            String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  sessionType   String   // "enlace_admin"
+  sessionType String // "enlace_admin"
 
   // Datos de sesión
-  cookies       Json
-  localStorage  Json?
-  sessionData   Json?
+  cookies      Json
+  localStorage Json?
+  sessionData  Json?
 
-  isValid       Boolean  @default(true)
-  lastUsedAt    DateTime @default(now())
-  expiresAt     DateTime
+  isValid    Boolean  @default(true)
+  lastUsedAt DateTime @default(now())
+  expiresAt  DateTime
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([sessionType, isValid])
+}
+
+// ========================================
+// MODELO PSE SESSION - FASE 6.2
+// ========================================
+model PseSession {
+  id        String @id @default(cuid())
+  sessionId String @unique // pse_planillaId_timestamp
+
+  // Relaciones
+  planillaId String
+  taskId     String
+  planilla   PilaPlanilla @relation(fields: [planillaId], references: [id], onDelete: Cascade)
+  task       Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // Estado
+  status PseStatus @default(AWAITING_CODE)
+
+  // Datos del pago
+  valorTotal     Int
+  numeroPlanilla String
+
+  // Control de tiempo
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime // createdAt + 60 segundos
+  codeEnteredAt DateTime? // Cuando el admin ingresa el código
+  completedAt   DateTime? // Cuando se completa o falla
+
+  // Código dinámico (encriptado)
+  dynamicCode String? // Almacenado encriptado
+  codeValid   Boolean? // Si el código funcionó
+
+  // Resultado
+  success Boolean?
+  error   String?  @db.Text
+
+  // Metadata
+  attempts Int @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  @@index([sessionId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([planillaId])
+  @@index([taskId])
+  @@map("pse_sessions")
+}
+
+// Enum de estados de sesión PSE
+enum PseStatus {
+  AWAITING_CODE // Esperando que el admin ingrese código
+  CODE_RECEIVED // Código recibido, bot va a procesarlo
+  PROCESSING // Bot procesando el pago
+  COMPLETED // Pago completado exitosamente
+  FAILED // Pago falló (código incorrecto, error banco, etc.)
+  TIMEOUT // Venció tiempo de espera (60 seg)
+  CANCELLED // Cancelado manualmente por admin
+}
+
+// ========================================
+// FASE 6: PAGO ADMIN-CONTROLLED
+// ========================================
+
+// Sesión de pago controlado por administrador
+model PagoAdminSession {
+  id        String @id @default(cuid())
+  sessionId String @unique // pago_admin_{planillaId}_{timestamp}
+
+  // Referencias
+  planillaId String
+  planilla   PilaPlanilla @relation(fields: [planillaId], references: [id], onDelete: Cascade)
+  taskId     String?
+  task       Task?        @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  // Estado actual
+  status PagoAdminStatus @default(PENDING_ADMIN)
+
+  // Información del pago
+  valorTotal Float
+  banco      String @default("BANCOLOMBIA")
+
+  // Control de sesión del navegador
+  browserSessionId String? // ID para recuperar página del navegador en memoria
+
+  // Screenshots
+  lastScreenshot    String? // URL del último screenshot
+  screenshotHistory Json?   // Array de URLs de screenshots anteriores
+
+  // Admin que está gestionando
+  adminId       String? // ID del admin que inició/gestiona
+  adminLockedAt DateTime? // Cuando el admin tomó el lock
+
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  startedAt       DateTime? // Cuando admin hizo clic en INICIAR
+  awaitingAdminAt DateTime? // Cuando RPA llegó a Bancolombia
+  completedAt     DateTime?
+
+  // Timeout configuración (10 minutos por defecto)
+  adminTimeoutMinutes Int      @default(10)
+  timeoutAt           DateTime? // Calculado: awaitingAdminAt + adminTimeoutMinutes
+
+  // Resultado
+  success       Boolean?
+  transactionId String?
+  errorMessage  String? @db.Text
+
+  // Progreso (0-100)
+  progress       Int     @default(0)
+  progressMessage String?
+
+  updatedAt DateTime @updatedAt
+
+  @@index([sessionId])
+  @@index([status])
+  @@index([planillaId])
+  @@index([adminId])
+  @@index([createdAt])
+  @@map("pago_admin_sessions")
+}
+
+// Estados de la sesión de pago admin-controlled
+enum PagoAdminStatus {
+  // Estados iniciales
+  PENDING_ADMIN        // Esperando que admin inicie el RPA
+
+  // Estados de procesamiento RPA
+  RPA_STARTING         // RPA iniciando navegador
+  RPA_AUTHENTICATING   // Autenticando en SOI/Enlace
+  RPA_NAVIGATING       // Navegando a planilla
+  RPA_PSE_PROCESS      // Procesando PSE (selección banco, datos)
+
+  // Estado de control admin
+  AWAITING_ADMIN_INPUT // En Bancolombia, admin debe actuar
+
+  // Estados de verificación
+  VERIFYING_PAYMENT    // Verificando resultado del pago
+  DOWNLOADING_RECEIPT  // Descargando comprobante
+
+  // Estados finales
+  COMPLETED            // Pago exitoso + comprobante guardado
+  FAILED               // Falló en algún punto
+  CANCELLED            // Cancelado por admin
+  TIMEOUT              // Timeout por inactividad del admin
 }

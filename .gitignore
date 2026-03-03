@@ -11,7 +11,7 @@ build/
 *.d.ts.map
 
 # Environment variables
-.env
+# .env  # Permitido en repo privado para sincronizar entre máquinas
 .env.local
 .env.*.local
 

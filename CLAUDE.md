@@ -1,7 +1,7 @@
 # CLAUDE.md - Contexto Completo del Proyecto ULE RPA Service
 
-**Fecha**: 2026-03-01
-**Versión**: 1.0
+**Fecha**: 2026-03-04
+**Versión**: 1.1
 **Propósito**: Documentación comprensiva para mantener contexto de IA entre sesiones
 
 ---
@@ -15,6 +15,57 @@ Este es un servicio RPA (Robotic Process Automation) que automatiza la liquidaci
 **Operadores soportados**:
 - **SOI** (nuevosoi.com.co) - Principal, preferido
 - **Mi Planilla** (miplanilla.com) - Alternativo cuando SOI falla
+
+---
+
+## ARQUITECTURA DE PRODUCCIÓN
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ARQUITECTURA ULE PRODUCCIÓN                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Usuarios (celular/web)                                        │
+│          │                                                      │
+│          ▼                                                      │
+│   ┌─────────────────────────────┐                               │
+│   │  ulecolombia.com (Vercel)   │  ← Next.js App               │
+│   │  Frontend + API Routes      │                               │
+│   └──────────────┬──────────────┘                               │
+│                  │                                              │
+│                  ▼                                              │
+│   ┌─────────────────────────────┐                               │
+│   │  Supabase (Backend/DB)      │  ← Auth, DB principal        │
+│   │  PostgreSQL + Auth          │                               │
+│   └──────────────┬──────────────┘                               │
+│                  │                                              │
+│                  │ Usuario paga → entra a queue                 │
+│                  ▼                                              │
+│   ┌─────────────────────────────┐                               │
+│   │  rpa.ulecolombia.com        │  ← Mac Servidor              │
+│   │  (Cloudflare Tunnel)        │     via Cloudflare Tunnel    │
+│   │  Puerto 3001                │                               │
+│   └─────────────────────────────┘                               │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**URLs de Producción:**
+- **App ULE**: https://ulecolombia.com (Vercel)
+- **RPA Service**: https://rpa.ulecolombia.com (Mac Servidor + Cloudflare)
+- **Supabase**: https://ncrpqghvqpbqxybtxnza.supabase.co
+
+**Mac Servidor (MacBook Pro 2012):**
+- RPA Server → Puerto 3001
+- PostgreSQL → Puerto 5432 (DB local: ule_rpa)
+- Redis → Puerto 6379 (BullMQ Queue)
+- Cloudflared → Túnel a internet
+
+**Servicios auto-inicio (LaunchAgents):**
+- `com.ule.rpa` - API + Worker
+- `com.ule.cloudflared` - Túnel Cloudflare
+- `postgresql@15` - Base de datos
+- `redis` - Cache/Queue
 
 ---
 
@@ -717,7 +768,7 @@ Password: [Admin ingresa manualmente - NO automatizar]
 ## 11. COMANDOS ÚTILES
 
 ```bash
-# Desarrollo
+# Desarrollo (en Mac de desarrollo)
 npm run dev              # API server
 npm run dev:worker       # Worker
 npm run dev:all          # Ambos
@@ -736,6 +787,37 @@ npx prisma generate      # Regenerar cliente
 # Ver tareas en Redis
 redis-cli
 > KEYS bull:*
+```
+
+### Deploy a Producción (Mac Servidor)
+
+```bash
+# Un solo comando para actualizar el servidor:
+bash ~/ule-rpa/deploy.sh
+```
+
+El script `deploy.sh` hace todo automáticamente:
+1. `git pull` - baja el código nuevo
+2. `npm install` - instala dependencias nuevas si hay
+3. `prisma generate` - regenera cliente de BD
+4. `prisma migrate deploy` - aplica migraciones nuevas
+5. `npm run build` - compila TypeScript
+6. Reinicia el servidor RPA (LaunchAgent)
+7. Reinicia el túnel Cloudflare
+8. Espera 10 segundos
+9. Verifica que todo esté healthy (local + internet)
+
+**Flujo de Deploy:**
+```
+Mac Desarrollo          GitHub              Mac Servidor
+      │                    │                     │
+      │ git push           │                     │
+      │───────────────────>│                     │
+      │                    │                     │
+      │                    │  bash ~/ule-rpa/deploy.sh
+      │                    │<────────────────────│
+      │                    │                     │
+      │                    │     ✅ Deployed     │
 ```
 
 ---
@@ -758,4 +840,4 @@ redis-cli
 
 ---
 
-**Última actualización**: 2026-03-02
+**Última actualización**: 2026-03-04

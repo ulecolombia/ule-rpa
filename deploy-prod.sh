@@ -68,7 +68,7 @@ ssh ${SERVER_USER}@${SERVER_IP} "cd ${SERVER_RPA_PATH} && bash deploy.sh"
 
 # Paso 5: Verificar deploy
 echo -e "\n${YELLOW}[5/5]${NC} Verificando deploy..."
-sleep 3  # Esperar que el servidor reinicie
+sleep 15  # Esperar que los servicios reinicien completamente
 
 HEALTH_RESPONSE=$(curl -s "${RPA_DOMAIN}/health" 2>/dev/null || echo "error")
 

@@ -18,8 +18,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuración
-SERVER_USER="luisbrochet"
-SERVER_IP="192.168.1.137"
+SERVER_HOST="ule-server"  # Usa Cloudflare Tunnel (funciona desde cualquier red)
 SERVER_RPA_PATH="~/ule-rpa"
 RPA_DOMAIN="https://rpa.ulecolombia.com"
 
@@ -54,17 +53,17 @@ fi
 
 # Paso 3: Verificar conexión SSH
 echo -e "\n${YELLOW}[3/5]${NC} Verificando conexión al servidor..."
-if ssh -o ConnectTimeout=5 ${SERVER_USER}@${SERVER_IP} "echo 'ok'" > /dev/null 2>&1; then
-    echo -e "${GREEN}✓${NC} Servidor accesible"
+if ssh -o ConnectTimeout=15 ${SERVER_HOST} "echo 'ok'" > /dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC} Servidor accesible via Cloudflare Tunnel"
 else
-    echo -e "${RED}✗${NC} No se puede conectar al servidor ${SERVER_IP}"
-    echo -e "${YELLOW}  Asegúrate que el Mac servidor esté encendido y en la misma red${NC}"
+    echo -e "${RED}✗${NC} No se puede conectar al servidor"
+    echo -e "${YELLOW}  Asegúrate que el Mac servidor esté encendido y el túnel activo${NC}"
     exit 1
 fi
 
 # Paso 4: Deploy en servidor
 echo -e "\n${YELLOW}[4/5]${NC} Desplegando en servidor..."
-ssh ${SERVER_USER}@${SERVER_IP} "cd ${SERVER_RPA_PATH} && bash deploy.sh"
+ssh ${SERVER_HOST} "cd ${SERVER_RPA_PATH} && bash deploy.sh"
 
 # Paso 5: Verificar deploy
 echo -e "\n${YELLOW}[5/5]${NC} Verificando deploy..."
@@ -85,5 +84,5 @@ echo -e "\n${GREEN}━━━━━━━━━━━━━━━━━━━━�
 echo -e "${GREEN}       ✅ Deploy completado exitosamente!            ${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "\n  🌐 ${RPA_DOMAIN}/health"
-echo -e "  📦 Servidor: ${SERVER_USER}@${SERVER_IP}"
+echo -e "  📦 Servidor: ${SERVER_HOST} (via Cloudflare Tunnel)"
 echo ""

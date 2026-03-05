@@ -653,7 +653,7 @@ export async function liquidarPlanillaAsUser(
  * Versión del bot de liquidación que usa una página existente
  * Para uso con sesiones de usuario específicas
  */
-class SOILiquidacionBotWithPage {
+class _SOILiquidacionBotWithPage {
   private page: Page;
 
   constructor(page: Page) {

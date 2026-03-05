@@ -33,3 +33,10 @@ export { taskWorker } from './worker';
 
 // Scheduler
 export { startScheduler, stopScheduler, getScheduledJobs } from './scheduler';
+
+// Reconciliation
+export {
+  runReconciliation,
+  getReconciliationStats,
+  reconcileUser,
+} from './reconciliation';

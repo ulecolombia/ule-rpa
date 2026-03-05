@@ -21,7 +21,6 @@ import { logger } from '../../utils/logger';
 import type {
   SOIPlanillaLiquidacion,
   SOICotizante,
-  SOISeguridadSocial,
 } from '../../types/soi-planilla.types';
 
 // ============================================================================
@@ -476,7 +475,7 @@ export class SOICrearPlanillaBot {
   private async llenarPopupPaso2(
     popup: Page,
     cotizante: SOICotizante,
-    selectors: typeof SOI_SELECTORS.AGREGAR_COTIZANTE.PASO2
+    _selectors: typeof SOI_SELECTORS.AGREGAR_COTIZANTE.PASO2
   ): Promise<void> {
     logger.info('Popup Paso 2: Novedades');
 
@@ -739,8 +738,8 @@ export class SOICrearPlanillaBot {
 
   private async llenarPopupPaso4(
     popup: Page,
-    cotizante: SOICotizante,
-    selectors: typeof SOI_SELECTORS.AGREGAR_COTIZANTE.PASO4
+    _cotizante: SOICotizante,
+    _selectors: typeof SOI_SELECTORS.AGREGAR_COTIZANTE.PASO4
   ): Promise<void> {
     logger.info('Popup Paso 4: Parafiscales');
 
@@ -842,7 +841,7 @@ export class SOICrearPlanillaBot {
 
   private async llenarPopupPaso5(
     popup: Page,
-    selectors: typeof SOI_SELECTORS.AGREGAR_COTIZANTE.PASO5
+    _selectors: typeof SOI_SELECTORS.AGREGAR_COTIZANTE.PASO5
   ): Promise<void> {
     logger.info('Popup Paso 5: Resumen - Guardar');
 

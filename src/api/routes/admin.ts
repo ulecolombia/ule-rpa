@@ -20,7 +20,22 @@ import {
   AdminRequest,
 } from '../middleware/adminAuth';
 import { getQueueStats, taskQueue, deadLetterQueue } from '../../orchestrator/queue.config';
+import {
+  runReconciliation,
+  getReconciliationStats,
+  reconcileUser,
+} from '../../orchestrator/reconciliation';
+import {
+  getAlerts,
+  getActiveAlerts,
+  acknowledgeAlert,
+  acknowledgeAllAlerts,
+  getAlertsSummary,
+  AlertSeverity,
+  AlertType,
+} from '../../services/alert.service';
 import { logger } from '../../utils/logger';
+import { decryptPassword } from '../../utils/crypto';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -1148,6 +1163,661 @@ router.get('/errors/recent', async (req: Request, res: Response) => {
       success: false,
       error: 'Internal server error',
     });
+  }
+});
+
+// ============================================================================
+// ALERTAS (FASE 3)
+// ============================================================================
+
+/**
+ * GET /api/admin/alerts
+ *
+ * Obtener historial de alertas
+ *
+ * Query params:
+ * - severity: filtrar por severidad (CRITICAL, HIGH, MEDIUM, LOW)
+ * - type: filtrar por tipo
+ * - acknowledged: filtrar por reconocidas (true/false)
+ * - limit: número máximo de alertas (default: 50)
+ */
+router.get('/alerts', async (req: Request, res: Response) => {
+  try {
+    const severity = req.query.severity as AlertSeverity | undefined;
+    const type = req.query.type as AlertType | undefined;
+    const acknowledged = req.query.acknowledged
+      ? req.query.acknowledged === 'true'
+      : undefined;
+    const limit = parseInt(req.query.limit as string) || 50;
+
+    const alerts = getAlerts({ severity, type, acknowledged, limit });
+
+    res.json({
+      success: true,
+      count: alerts.length,
+      alerts,
+    });
+  } catch (error) {
+    logger.error('Error fetching alerts', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/admin/alerts/active
+ *
+ * Obtener alertas activas (no reconocidas)
+ */
+router.get('/alerts/active', async (_req: Request, res: Response) => {
+  try {
+    const alerts = getActiveAlerts();
+
+    res.json({
+      success: true,
+      count: alerts.length,
+      alerts,
+    });
+  } catch (error) {
+    logger.error('Error fetching active alerts', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/admin/alerts/summary
+ *
+ * Obtener resumen de alertas
+ */
+router.get('/alerts/summary', async (_req: Request, res: Response) => {
+  try {
+    const summary = getAlertsSummary();
+
+    res.json({
+      success: true,
+      ...summary,
+    });
+  } catch (error) {
+    logger.error('Error fetching alerts summary', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/admin/alerts/:id/acknowledge
+ *
+ * Reconocer una alerta
+ */
+router.post('/alerts/:id/acknowledge', async (req: AdminRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const acknowledgedBy = req.admin?.ip || 'unknown';
+
+    const success = acknowledgeAlert(id, acknowledgedBy);
+
+    if (!success) {
+      res.status(404).json({ error: 'Alert not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Alert acknowledged',
+      alertId: id,
+    });
+  } catch (error) {
+    logger.error('Error acknowledging alert', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/admin/alerts/acknowledge-all
+ *
+ * Reconocer todas las alertas
+ */
+router.post('/alerts/acknowledge-all', async (req: AdminRequest, res: Response) => {
+  try {
+    const acknowledgedBy = req.admin?.ip || 'unknown';
+
+    const count = acknowledgeAllAlerts(acknowledgedBy);
+
+    res.json({
+      success: true,
+      message: `${count} alerts acknowledged`,
+      count,
+    });
+  } catch (error) {
+    logger.error('Error acknowledging all alerts', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// RECONCILIACIÓN (FASE 2)
+// ============================================================================
+
+/**
+ * GET /api/admin/reconciliation/stats
+ *
+ * Estadísticas de usuarios en estados problemáticos
+ */
+router.get('/reconciliation/stats', async (_req: Request, res: Response) => {
+  try {
+    const stats = await getReconciliationStats();
+
+    res.json({
+      success: true,
+      stats,
+      needsAttention:
+        stats.pendingCreation +
+          stats.creating +
+          stats.registering +
+          stats.staleProcessingTasks +
+          stats.expiredPendingPlanillas >
+        0,
+    });
+  } catch (error) {
+    logger.error('Error fetching reconciliation stats', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/admin/reconciliation/run
+ *
+ * Ejecutar job de reconciliación manualmente
+ */
+router.post('/reconciliation/run', async (req: AdminRequest, res: Response) => {
+  try {
+    logger.info('Manual reconciliation triggered by admin', { ip: req.admin?.ip });
+
+    const result = await runReconciliation();
+
+    res.json({
+      success: true,
+      message: 'Reconciliation completed',
+      result,
+    });
+  } catch (error) {
+    logger.error('Error running reconciliation', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/admin/reconciliation/user/:uleUserId
+ *
+ * Reconciliar un usuario específico
+ */
+router.post('/reconciliation/user/:uleUserId', async (req: AdminRequest, res: Response) => {
+  try {
+    const { uleUserId } = req.params;
+
+    logger.info('Manual user reconciliation by admin', {
+      uleUserId,
+      ip: req.admin?.ip,
+    });
+
+    const result = await reconcileUser(uleUserId);
+
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+
+    res.json(result);
+  } catch (error) {
+    logger.error('Error reconciling user', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/admin/users/stuck
+ *
+ * Lista usuarios en estados problemáticos
+ */
+router.get('/users/stuck', async (_req: Request, res: Response) => {
+  try {
+    const [pendingCreation, creating, registering, credentialsError] = await Promise.all([
+      prisma.enlaceUser.findMany({
+        where: { soiAccountStatus: 'PENDING_CREATION' },
+        select: {
+          id: true,
+          uleUserId: true,
+          numeroDocumento: true,
+          nombre: true,
+          operador: true,
+          soiAccountStatus: true,
+          updatedAt: true,
+        },
+        take: 50,
+      }),
+      prisma.enlaceUser.findMany({
+        where: { soiAccountStatus: 'CREATING' },
+        select: {
+          id: true,
+          uleUserId: true,
+          numeroDocumento: true,
+          nombre: true,
+          operador: true,
+          soiAccountStatus: true,
+          updatedAt: true,
+        },
+        take: 50,
+      }),
+      prisma.enlaceUser.findMany({
+        where: { enlaceStatus: 'REGISTERING' },
+        select: {
+          id: true,
+          uleUserId: true,
+          numeroDocumento: true,
+          nombre: true,
+          operador: true,
+          enlaceStatus: true,
+          updatedAt: true,
+        },
+        take: 50,
+      }),
+      prisma.enlaceUser.findMany({
+        where: { soiAccountStatus: 'CREDENTIALS_ERROR' },
+        select: {
+          id: true,
+          uleUserId: true,
+          numeroDocumento: true,
+          nombre: true,
+          operador: true,
+          soiAccountStatus: true,
+          updatedAt: true,
+        },
+        take: 50,
+      }),
+    ]);
+
+    res.json({
+      success: true,
+      users: {
+        pendingCreation,
+        creating,
+        registering,
+        credentialsError,
+      },
+      totals: {
+        pendingCreation: pendingCreation.length,
+        creating: creating.length,
+        registering: registering.length,
+        credentialsError: credentialsError.length,
+      },
+    });
+  } catch (error) {
+    logger.error('Error fetching stuck users', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// OPERACIONES MANUALES DE EMERGENCIA
+// ============================================================================
+
+/**
+ * GET /api/admin/emergency/user/:uleUserId
+ *
+ * Obtener TODA la información de un usuario incluyendo credenciales desencriptadas
+ * ⚠️ SOLO PARA EMERGENCIAS - Cuando el RPA falla y necesitas hacer operaciones manuales
+ *
+ * Devuelve:
+ * - Datos del usuario
+ * - Credenciales SOI (desencriptadas)
+ * - Credenciales Mi Planilla (desencriptadas)
+ * - Planillas pendientes
+ * - URLs de los portales
+ */
+router.get('/emergency/user/:uleUserId', async (req: AdminRequest, res: Response) => {
+  try {
+    const { uleUserId } = req.params;
+
+    logger.warn('EMERGENCY: Admin accessing user credentials', {
+      uleUserId,
+      adminIp: req.admin?.ip,
+    });
+
+    const user = await prisma.enlaceUser.findUnique({
+      where: { uleUserId },
+      include: {
+        planillas: {
+          where: {
+            estadoPago: {
+              in: ['PENDIENTE', 'EN_PROCESO'],
+            },
+          },
+          orderBy: { fechaLimite: 'asc' },
+        },
+      },
+    });
+
+    if (!user) {
+      res.status(404).json({ error: 'Usuario no encontrado' });
+      return;
+    }
+
+    // Desencriptar credenciales SOI
+    let soiPassword: string | null = null;
+    if (user.soiPassword && user.soiPasswordIV) {
+      try {
+        soiPassword = decryptPassword(user.soiPassword, user.soiPasswordIV);
+      } catch (e) {
+        soiPassword = '[ERROR AL DESENCRIPTAR]';
+      }
+    }
+
+    // Desencriptar credenciales Mi Planilla
+    let miplanillaPassword: string | null = null;
+    if (user.miplanillaPassword && user.miplanillaPasswordIV) {
+      try {
+        miplanillaPassword = decryptPassword(user.miplanillaPassword, user.miplanillaPasswordIV);
+      } catch (e) {
+        miplanillaPassword = '[ERROR AL DESENCRIPTAR]';
+      }
+    }
+
+    res.json({
+      success: true,
+      warning: '⚠️ INFORMACIÓN SENSIBLE - SOLO PARA OPERACIONES MANUALES DE EMERGENCIA',
+
+      usuario: {
+        uleUserId: user.uleUserId,
+        tipoDocumento: user.tipoDocumento,
+        numeroDocumento: user.numeroDocumento,
+        nombre: user.nombre,
+        apellidos: user.apellidos,
+        email: user.email,
+        telefono: user.telefono || user.celular,
+        operador: user.operador,
+        soiAccountStatus: user.soiAccountStatus,
+      },
+
+      credenciales: {
+        soi: user.operador === 'SOI' || user.soiPassword ? {
+          portal: 'https://www.nuevosoi.com.co/independientes',
+          tipoDocumento: user.tipoDocumento,
+          documento: user.numeroDocumento,
+          password: soiPassword,
+          status: user.soiAccountStatus,
+          instrucciones: [
+            '1. Ir a https://www.nuevosoi.com.co/independientes',
+            '2. Seleccionar tipo documento: ' + user.tipoDocumento,
+            '3. Ingresar documento: ' + user.numeroDocumento,
+            '4. Ingresar contraseña: ' + (soiPassword || '[NO DISPONIBLE]'),
+            '5. Click en Ingresar',
+          ],
+        } : null,
+
+        miPlanilla: user.operador === 'MI_PLANILLA' || user.miplanillaPassword ? {
+          portal: 'https://independientes2.miplanilla.com/',
+          usuario: 'CC' + user.numeroDocumento,
+          password: miplanillaPassword,
+          instrucciones: [
+            '1. Ir a https://independientes2.miplanilla.com/',
+            '2. Ingresar usuario: CC' + user.numeroDocumento,
+            '3. Ingresar contraseña: ' + (miplanillaPassword || '[NO DISPONIBLE]'),
+            '4. Click en Ingresar',
+          ],
+        } : null,
+      },
+
+      planillasPendientes: user.planillas.map((p) => ({
+        id: p.id,
+        numeroPlanilla: p.numeroPlanilla,
+        periodo: p.periodo,
+        total: p.total,
+        estadoPago: p.estadoPago,
+        fechaLimite: p.fechaLimite,
+        diasRestantes: Math.ceil(
+          (p.fechaLimite.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+        ),
+      })),
+
+      pse: {
+        instrucciones: [
+          '1. Después de login, ir a planillas pendientes',
+          '2. Seleccionar planilla a pagar',
+          '3. Click en "Pagar por PSE"',
+          '4. Seleccionar banco: BANCOLOMBIA',
+          '5. Tipo persona: JURIDICA',
+          '6. NIT: 9020190314',
+          '7. Email: ulecolombia@gmail.com',
+          '8. Continuar a Bancolombia',
+          '9. Usuario Bancolombia: Lbrochet01',
+          '10. Ingresar contraseña y OTP manualmente',
+        ],
+        bancolombiaUser: 'Lbrochet01',
+        nitULE: '9020190314',
+        emailULE: 'ulecolombia@gmail.com',
+      },
+    });
+  } catch (error) {
+    logger.error('Error in emergency user lookup', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/admin/emergency/users/pending
+ *
+ * Lista todos los usuarios con planillas pendientes de pago
+ * Para operaciones manuales masivas
+ */
+router.get('/emergency/users/pending', async (req: AdminRequest, res: Response) => {
+  try {
+    logger.warn('EMERGENCY: Admin listing all pending users', {
+      adminIp: req.admin?.ip,
+    });
+
+    const usersWithPending = await prisma.enlaceUser.findMany({
+      where: {
+        planillas: {
+          some: {
+            estadoPago: 'PENDIENTE',
+            fechaLimite: {
+              gte: new Date(), // No vencidas
+            },
+          },
+        },
+      },
+      include: {
+        planillas: {
+          where: {
+            estadoPago: 'PENDIENTE',
+          },
+          orderBy: { fechaLimite: 'asc' },
+        },
+      },
+      orderBy: {
+        planillas: {
+          _count: 'desc',
+        },
+      },
+    });
+
+    const result = await Promise.all(
+      usersWithPending.map(async (user) => {
+        // Desencriptar passwords
+        let password: string | null = null;
+
+        if (user.operador === 'SOI' && user.soiPassword && user.soiPasswordIV) {
+          try {
+            password = decryptPassword(user.soiPassword, user.soiPasswordIV);
+          } catch {
+            password = '[ERROR]';
+          }
+        } else if (user.operador === 'MI_PLANILLA' && user.miplanillaPassword && user.miplanillaPasswordIV) {
+          try {
+            password = decryptPassword(user.miplanillaPassword, user.miplanillaPasswordIV);
+          } catch {
+            password = '[ERROR]';
+          }
+        }
+
+        return {
+          uleUserId: user.uleUserId,
+          nombre: user.nombre,
+          documento: user.numeroDocumento,
+          operador: user.operador,
+          credenciales: {
+            usuario: user.operador === 'MI_PLANILLA' ? 'CC' + user.numeroDocumento : user.numeroDocumento,
+            password,
+          },
+          planillas: user.planillas.map((p) => ({
+            numeroPlanilla: p.numeroPlanilla,
+            periodo: p.periodo,
+            total: p.total,
+            fechaLimite: p.fechaLimite,
+            diasRestantes: Math.ceil(
+              (p.fechaLimite.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+            ),
+          })),
+          totalPendiente: user.planillas.reduce((sum, p) => sum + p.total, 0),
+        };
+      })
+    );
+
+    res.json({
+      success: true,
+      warning: '⚠️ INFORMACIÓN SENSIBLE - CREDENCIALES DESENCRIPTADAS',
+      count: result.length,
+      users: result,
+      portales: {
+        soi: 'https://www.nuevosoi.com.co/independientes',
+        miPlanilla: 'https://independientes2.miplanilla.com/',
+      },
+    });
+  } catch (error) {
+    logger.error('Error listing pending users', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/admin/emergency/user/:uleUserId/change-operator
+ *
+ * Cambiar el operador de un usuario (SOI <-> MI_PLANILLA)
+ * Útil cuando SOI no funciona para un usuario específico
+ */
+router.post('/emergency/user/:uleUserId/change-operator', async (req: AdminRequest, res: Response) => {
+  try {
+    const { uleUserId } = req.params;
+    const { newOperator } = req.body;
+
+    if (!['SOI', 'MI_PLANILLA'].includes(newOperator)) {
+      res.status(400).json({ error: 'Operador inválido. Debe ser SOI o MI_PLANILLA' });
+      return;
+    }
+
+    logger.warn('EMERGENCY: Admin changing user operator', {
+      uleUserId,
+      newOperator,
+      adminIp: req.admin?.ip,
+    });
+
+    const user = await prisma.enlaceUser.findUnique({
+      where: { uleUserId },
+    });
+
+    if (!user) {
+      res.status(404).json({ error: 'Usuario no encontrado' });
+      return;
+    }
+
+    const oldOperator = user.operador;
+
+    await prisma.enlaceUser.update({
+      where: { uleUserId },
+      data: {
+        operador: newOperator,
+        // Si cambia a Mi Planilla y no tiene credenciales, resetear SOI status
+        ...(newOperator === 'MI_PLANILLA' && !user.miplanillaPassword
+          ? { soiAccountStatus: 'NOT_LINKED' }
+          : {}),
+      },
+    });
+
+    res.json({
+      success: true,
+      message: `Operador cambiado de ${oldOperator} a ${newOperator}`,
+      uleUserId,
+      oldOperator,
+      newOperator,
+      note: newOperator === 'MI_PLANILLA' && !user.miplanillaPassword
+        ? 'El usuario no tiene credenciales de Mi Planilla. Necesitará registrarse.'
+        : undefined,
+    });
+  } catch (error) {
+    logger.error('Error changing operator', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/admin/emergency/planilla/:planillaId/mark-paid
+ *
+ * Marcar una planilla como pagada manualmente
+ * Usar cuando pagaste manualmente en el portal
+ */
+router.post('/emergency/planilla/:planillaId/mark-paid', async (req: AdminRequest, res: Response) => {
+  try {
+    const { planillaId } = req.params;
+    const { transactionId, notes } = req.body;
+
+    logger.warn('EMERGENCY: Admin marking planilla as paid manually', {
+      planillaId,
+      transactionId,
+      adminIp: req.admin?.ip,
+    });
+
+    const planilla = await prisma.pilaPlanilla.findUnique({
+      where: { id: planillaId },
+    });
+
+    if (!planilla) {
+      res.status(404).json({ error: 'Planilla no encontrada' });
+      return;
+    }
+
+    await prisma.pilaPlanilla.update({
+      where: { id: planillaId },
+      data: {
+        estadoPago: 'PAGADA',
+        fechaPago: new Date(),
+      },
+    });
+
+    // Crear log de la acción
+    await prisma.taskLog.create({
+      data: {
+        taskId: planilla.taskId,
+        level: 'WARN',
+        message: 'Planilla marcada como PAGADA manualmente por admin',
+        details: {
+          planillaId,
+          transactionId,
+          notes,
+          adminIp: req.admin?.ip,
+          timestamp: new Date().toISOString(),
+        },
+      },
+    });
+
+    res.json({
+      success: true,
+      message: 'Planilla marcada como PAGADA',
+      planillaId,
+      numeroPlanilla: planilla.numeroPlanilla,
+      periodo: planilla.periodo,
+      total: planilla.total,
+    });
+  } catch (error) {
+    logger.error('Error marking planilla as paid', { error });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

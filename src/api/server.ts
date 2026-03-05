@@ -23,6 +23,7 @@ import webhooksRouter from './routes/webhooks';
 import adminRouter from './routes/admin';
 import logsRouter from './routes/logs';
 import soiRouter from './routes/soi';
+import pagoRouter from './routes/pago';
 
 const app = express();
 
@@ -71,6 +72,7 @@ app.use('/health', healthRouter);
 app.use('/api/tasks', tasksRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/admin', adminRouter);
+app.use('/api/admin/pago', pagoRouter);
 app.use('/api/logs', logsRouter);
 app.use('/api/soi', soiRouter);
 

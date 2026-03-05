@@ -10,7 +10,7 @@ import { logger, createChildLogger } from '../utils/logger';
 // config removed - pilaOperator no longer used after Enlace removal
 import { TaskInput, TaskResult } from '../types';
 
-// SOI imports (only supported operator)
+// SOI imports
 import {
   registrarUsuarioSOI,
   pagarPlanillaSOI,
@@ -19,12 +19,23 @@ import {
   // Nuevo bot de crear planilla con IBC
   SOIAuthBot,
   SOICrearPlanillaBot,
+  // FASE 1: Comprobante bot
+  descargarComprobanteSOI,
+  verificarEstadoPlanillaSOI,
 } from '../bots/soi';
+
+// Mi Planilla imports - FASE 1: Comprobante support
+import {
+  descargarComprobanteMiPlanilla,
+  verificarEstadoPlanillaMiPlanilla,
+} from '../bots/miplanilla';
+
 import type { SOIPlanillaLiquidacion } from '../types/soi-planilla.types';
 import { decryptPassword } from '../utils/crypto';
 
-// Storage uploader - available for future use
-// import { uploadComprobanteToStorage } from '../storage/uploader';
+// Storage uploader - FASE 1: Enabled for comprobante upload
+import { uploadComprobanteToStorage } from '../storage/uploader';
+
 import { startScheduler, stopScheduler } from './scheduler';
 import {
   emitTaskUpdate,
@@ -33,13 +44,25 @@ import {
   emitLog,
   emitPlanillaUpdate,
   emitQueueUpdate,
+  emitComprobanteReady,
 } from '../api/websocket';
 import { getQueueStats } from './queue.config';
+
+// ULE notifier - all notifications
 import {
   notificarLiquidacionCreada,
   notificarLiquidacionEnProgreso,
   notificarLiquidacionFallida,
+  notificarPagoCompletado,
 } from '../services/ule-notifier';
+
+// FASE 3: Alert service
+import {
+  alertTaskFailed,
+  alertQueueBacklog,
+  alertComprobanteDownloadFailed,
+  alertSystemError,
+} from '../services/alert.service';
 
 const prisma = new PrismaClient();
 
@@ -260,8 +283,233 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
       }
 
       case 'COMPROBANTE': {
-        // DEPRECATED: Comprobante download via Enlace is no longer supported
-        throw new Error('COMPROBANTE task type is deprecated. Use SOI comprobante flow instead.');
+        // FASE 1: Implementación completa del flujo de comprobantes (SOI y Mi Planilla)
+        const { numeroPlanilla, planillaId } = job.data;
+        const periodo = job.data.pilaData?.periodo;
+
+        if (!numeroPlanilla) {
+          throw new Error('numeroPlanilla is required for COMPROBANTE task');
+        }
+
+        // Determinar operador del usuario
+        const enlaceUser = await prisma.enlaceUser.findUnique({
+          where: { uleUserId: job.data.uleUserId },
+          select: {
+            operador: true,
+            tipoDocumento: true,
+            numeroDocumento: true,
+            miplanillaPassword: true,
+            miplanillaPasswordIV: true,
+          },
+        });
+
+        const operador = enlaceUser?.operador || 'SOI';
+
+        // Log inicio
+        await logTaskProgress(task.id, 'INFO', 'Starting comprobante download', {
+          numeroPlanilla,
+          planillaId,
+          periodo,
+          operador,
+        });
+
+        // Variables para resultado de descarga (polimórfico)
+        let estadoResult: { estado: 'PENDIENTE' | 'PAGADA' | 'RECHAZADA' | 'VENCIDA' | 'NO_ENCONTRADA' };
+        let downloadResult: { success: boolean; filePath?: string; fileName?: string; fileSize?: number; error?: string };
+
+        // PASO 1: Verificar estado de la planilla según operador
+        if (operador === 'MI_PLANILLA' && enlaceUser?.miplanillaPassword) {
+          await logTaskProgress(task.id, 'INFO', 'Verifying planilla status in Mi Planilla');
+
+          // Desencriptar password de Mi Planilla
+          const miplanillaPass = enlaceUser.miplanillaPasswordIV
+            ? decryptPassword(enlaceUser.miplanillaPassword, enlaceUser.miplanillaPasswordIV)
+            : enlaceUser.miplanillaPassword;
+
+          estadoResult = await verificarEstadoPlanillaMiPlanilla(numeroPlanilla, {
+            tipoDocumento: (enlaceUser.tipoDocumento || 'CC') as 'CC' | 'CE',
+            documento: enlaceUser.numeroDocumento || '',
+            password: miplanillaPass,
+          });
+        } else {
+          await logTaskProgress(task.id, 'INFO', 'Verifying planilla status in SOI');
+          estadoResult = await verificarEstadoPlanillaSOI(numeroPlanilla);
+        }
+
+        if (estadoResult.estado !== 'PAGADA') {
+          await logTaskProgress(task.id, 'WARN', 'Planilla is not PAGADA', {
+            estado: estadoResult.estado,
+            numeroPlanilla,
+          });
+
+          // No es error crítico - la planilla aún no está pagada
+          result = {
+            success: false,
+            error: `Planilla not ready for comprobante download. Status: ${estadoResult.estado}`,
+            duration: Date.now() - startTime,
+            data: {
+              numeroPlanilla,
+              estadoPlanilla: estadoResult.estado,
+              shouldRetry: estadoResult.estado === 'PENDIENTE',
+            },
+          };
+          break;
+        }
+
+        // PASO 2: Descargar comprobante según operador
+        if (operador === 'MI_PLANILLA' && enlaceUser?.miplanillaPassword) {
+          await logTaskProgress(task.id, 'INFO', 'Downloading comprobante PDF from Mi Planilla');
+
+          // Desencriptar password de Mi Planilla
+          const miplanillaPass = enlaceUser.miplanillaPasswordIV
+            ? decryptPassword(enlaceUser.miplanillaPassword, enlaceUser.miplanillaPasswordIV)
+            : enlaceUser.miplanillaPassword;
+
+          downloadResult = await descargarComprobanteMiPlanilla({
+            numeroPlanilla,
+            uleUserId: job.data.uleUserId,
+            periodo,
+            tipoDocumento: (enlaceUser.tipoDocumento || 'CC') as 'CC' | 'CE',
+            documento: enlaceUser.numeroDocumento || '',
+            password: miplanillaPass,
+          });
+        } else {
+          await logTaskProgress(task.id, 'INFO', 'Downloading comprobante PDF from SOI');
+          downloadResult = await descargarComprobanteSOI({
+            numeroPlanilla,
+            uleUserId: job.data.uleUserId,
+            periodo,
+          });
+        }
+
+        if (!downloadResult.success) {
+          await logTaskProgress(task.id, 'ERROR', 'Failed to download comprobante', {
+            error: downloadResult.error,
+          });
+          throw new Error(downloadResult.error || 'Comprobante download failed');
+        }
+
+        // PASO 3: Subir a storage
+        await logTaskProgress(task.id, 'INFO', 'Uploading comprobante to storage', {
+          localPath: downloadResult.filePath,
+          fileSize: downloadResult.fileSize,
+        });
+
+        // Obtener datos de la planilla para metadata
+        let planillaData = { total: 0 };
+        if (planillaId) {
+          const planilla = await prisma.pilaPlanilla.findUnique({
+            where: { id: planillaId },
+            select: { total: true },
+          });
+          if (planilla) {
+            planillaData = planilla;
+          }
+        }
+
+        const uploadResult = await uploadComprobanteToStorage(
+          downloadResult.filePath!,
+          {
+            userId: job.data.uleUserId,
+            numeroPlanilla,
+            periodo: periodo || new Date().toISOString().slice(0, 7),
+            valor: planillaData.total,
+            fechaPago: new Date(),
+          },
+          true // cleanup local file after upload
+        );
+
+        if (!uploadResult.success) {
+          await logTaskProgress(task.id, 'ERROR', 'Failed to upload comprobante to storage', {
+            error: uploadResult.error,
+          });
+          throw new Error(uploadResult.error || 'Storage upload failed');
+        }
+
+        // PASO 4: Crear registro de Comprobante y actualizar planilla
+        await logTaskProgress(task.id, 'INFO', 'Creating comprobante record', {
+          planillaId,
+          fileUrl: uploadResult.url,
+        });
+
+        if (planillaId) {
+          // Crear registro de comprobante
+          await prisma.comprobante.upsert({
+            where: { planillaId },
+            create: {
+              planillaId,
+              uleUserId: job.data.uleUserId,
+              fileName: downloadResult.fileName || `comprobante_${numeroPlanilla}.pdf`,
+              filePath: uploadResult.publicId || '',
+              fileUrl: uploadResult.url,
+              fileSize: downloadResult.fileSize || 0,
+              mimeType: 'application/pdf',
+              downloadedAt: new Date(),
+              uploadedToUle: true,
+              uploadedAt: new Date(),
+            },
+            update: {
+              fileName: downloadResult.fileName || `comprobante_${numeroPlanilla}.pdf`,
+              filePath: uploadResult.publicId || '',
+              fileUrl: uploadResult.url,
+              fileSize: downloadResult.fileSize || 0,
+              uploadedToUle: true,
+              uploadedAt: new Date(),
+            },
+          });
+
+          // Actualizar estado de la planilla
+          await prisma.pilaPlanilla.update({
+            where: { id: planillaId },
+            data: {
+              estadoPago: 'PAGADA',
+              fechaPago: new Date(),
+            },
+          });
+
+          // Emitir actualización via WebSocket
+          emitPlanillaUpdate(planillaId, {
+            numeroPlanilla,
+            estadoPago: 'PAGADA',
+            hasComprobante: true,
+            userId: job.data.uleUserId,
+          });
+
+          // Emitir evento específico de comprobante listo
+          emitComprobanteReady({
+            planillaId,
+            numeroPlanilla,
+            fileUrl: uploadResult.url!,
+            userId: job.data.uleUserId,
+          });
+        }
+
+        // PASO 5: Notificar a ULE
+        await logTaskProgress(task.id, 'INFO', 'Notifying ULE about comprobante');
+        await notificarPagoCompletado(
+          job.data.uleUserId,
+          planillaId || '',
+          numeroPlanilla,
+          uploadResult.url!
+        );
+
+        await logTaskProgress(task.id, 'INFO', 'Comprobante process completed successfully', {
+          comprobanteUrl: uploadResult.url,
+          fileSize: downloadResult.fileSize,
+        });
+
+        result = {
+          success: true,
+          duration: Date.now() - startTime,
+          data: {
+            numeroPlanilla,
+            comprobanteUrl: uploadResult.url,
+            fileName: downloadResult.fileName,
+            fileSize: downloadResult.fileSize,
+            estadoPlanilla: 'PAGADA',
+          },
+        };
+        break;
       }
 
       case 'FULL_FLOW': {
@@ -694,17 +942,43 @@ taskWorker.on('failed', async (job, err) => {
     attempt: job?.attemptsMade,
   });
 
+  // FASE 3: Send alert for failed task
+  try {
+    if (job) {
+      await alertTaskFailed(
+        job.id || 'unknown',
+        job.data.type,
+        err.message,
+        job.data.uleUserId
+      );
+    }
+  } catch (alertError) {
+    logger.error('Failed to send task failed alert', { error: alertError });
+  }
+
   // Emit queue update via WebSocket
   try {
     const stats = await getQueueStats();
     emitQueueUpdate(stats);
+
+    // FASE 3: Alert if queue is backing up
+    if (stats.waiting > 50) {
+      await alertQueueBacklog(stats.waiting, stats.active);
+    }
   } catch (error) {
     logger.error('Failed to emit queue update', { error });
   }
 });
 
-taskWorker.on('error', (err) => {
+taskWorker.on('error', async (err) => {
   logger.error('Worker error', { error: err.message });
+
+  // FASE 3: Alert for worker error (critical)
+  try {
+    await alertSystemError(err.message, 'TaskWorker');
+  } catch (alertError) {
+    logger.error('Failed to send worker error alert', { error: alertError });
+  }
 });
 
 taskWorker.on('stalled', (jobId) => {

@@ -546,7 +546,7 @@ async function generarNuevaPlanilla(
     for (let modalAttempt = 0; modalAttempt < 5; modalAttempt++) {
       const modalClosed = await page.evaluate(() => {
         // Buscar cualquier botón de cerrar modal
-        const closeSelectors = [
+        const _closeSelectors = [
           'button:contains("No, continuar")',
           'button:contains("continuar sin actualizar")',
           '.modal .close',
@@ -672,7 +672,7 @@ async function generarNuevaPlanilla(
       const buttons = document.querySelectorAll('button, a.btn');
       for (const btn of Array.from(buttons)) {
         const text = (btn as HTMLElement).innerText?.trim().toLowerCase() || '';
-        const classList = (btn as HTMLElement).className?.toLowerCase() || '';
+        const _classList = (btn as HTMLElement).className?.toLowerCase() || '';
 
         // Buscar específicamente el botón naranja "Generar Planilla"
         if ((text === 'generar planilla' || text.includes('generar planilla')) &&
@@ -733,7 +733,7 @@ async function generarNuevaPlanilla(
   }
 }
 
-async function cerrarModalARL(page: Page): Promise<void> {
+async function _cerrarModalARL(page: Page): Promise<void> {
   try {
     // Esperar un poco a que el modal aparezca
     await sleep(2000);
@@ -787,7 +787,7 @@ async function cerrarModalARL(page: Page): Promise<void> {
   }
 }
 
-async function modificarIBC(page: Page, ibc: number): Promise<void> {
+async function _modificarIBC(page: Page, ibc: number): Promise<void> {
   // Click en "Modificar información"
   await page.evaluate(() => {
     const links = document.querySelectorAll('a, button');

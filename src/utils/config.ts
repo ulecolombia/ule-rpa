@@ -33,7 +33,7 @@ const envSchema = z.object({
   ULE_WEBHOOK_SECRET: z.string().min(16, 'ULE_WEBHOOK_SECRET must be at least 16 characters'),
 
   // Storage
-  STORAGE_TYPE: z.enum(['local', 's3']).default('local'),
+  STORAGE_TYPE: z.enum(['local', 's3', 'supabase']).default('local'),
   STORAGE_PATH: z.string().default('./uploads'),
   STORAGE_BASE_URL: z.string().url('STORAGE_BASE_URL must be a valid URL'),
 

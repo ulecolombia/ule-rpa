@@ -12,6 +12,7 @@ interface NotificacionPILA {
   error?: string;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 interface _NotificacionLiquidacion {
   tipo: 'LIQUIDACION_CREADA' | 'LIQUIDACION_LISTA' | 'LIQUIDACION_FALLIDA';
   planillaId?: string;

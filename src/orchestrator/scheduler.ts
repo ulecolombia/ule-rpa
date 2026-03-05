@@ -12,6 +12,8 @@ import {
   getQueueStats,
   redisConnection,
 } from './queue.config';
+import { runReconciliation, getReconciliationStats } from './reconciliation';
+import { runMonitoringChecks } from '../services/alert.service';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
@@ -40,6 +42,12 @@ const SCHEDULES = {
 
   // Every 2 hours - Check for paid planillas and download comprobantes
   CHECK_PLANILLAS: '0 */2 * * *',
+
+  // Every 4 hours - Run reconciliation job for stuck users
+  RECONCILIATION: '0 */4 * * *',
+
+  // Every 15 minutes - Run monitoring checks for alerts
+  MONITORING_CHECKS: '*/15 * * * *',
 };
 
 /**
@@ -351,6 +359,44 @@ async function checkPaidPlanillasTask() {
 }
 
 /**
+ * Run reconciliation job to fix stuck users and tasks
+ * FASE 2: Handles orphaned users and stale states
+ */
+async function reconciliationTask() {
+  try {
+    logger.info('Running scheduled job: Reconciliation');
+
+    // Log current stats before reconciliation
+    const statsBefore = await getReconciliationStats();
+    logger.info('Reconciliation stats before', statsBefore);
+
+    // Run reconciliation
+    const result = await runReconciliation();
+
+    logger.info('Reconciliation completed', {
+      ...result,
+      statsBefore,
+    });
+
+    // Alert if there are many stuck users
+    if (statsBefore.pendingCreation + statsBefore.creating > 10) {
+      logger.warn('High number of users stuck in registration', {
+        pendingCreation: statsBefore.pendingCreation,
+        creating: statsBefore.creating,
+      });
+    }
+
+    if (statsBefore.credentialsError > 5) {
+      logger.warn('Multiple users with credentials errors', {
+        count: statsBefore.credentialsError,
+      });
+    }
+  } catch (error) {
+    logger.error('Failed to run reconciliation job', { error });
+  }
+}
+
+/**
  * Sync task statuses between database and queue
  * Ensures database is consistent with actual job states
  */
@@ -484,7 +530,28 @@ export function startScheduler() {
   });
   logger.info('Scheduled: Check paid planillas (every 2 hours)');
 
-  logger.info('Scheduler started successfully - 8 jobs scheduled');
+  // Run reconciliation every 4 hours
+  cron.schedule(SCHEDULES.RECONCILIATION, reconciliationTask, {
+    name: 'reconciliation',
+    timezone: 'America/Bogota',
+  });
+  logger.info('Scheduled: Reconciliation (every 4 hours)');
+
+  // Run monitoring checks every 15 minutes
+  cron.schedule(SCHEDULES.MONITORING_CHECKS, async () => {
+    try {
+      logger.debug('Running scheduled job: Monitoring checks');
+      await runMonitoringChecks();
+    } catch (error) {
+      logger.error('Failed to run monitoring checks', { error });
+    }
+  }, {
+    name: 'monitoring-checks',
+    timezone: 'America/Bogota',
+  });
+  logger.info('Scheduled: Monitoring checks (every 15 minutes)');
+
+  logger.info('Scheduler started successfully - 10 jobs scheduled');
 
   // Run health check immediately on startup
   healthCheckTask();

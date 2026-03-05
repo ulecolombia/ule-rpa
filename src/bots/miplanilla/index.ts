@@ -36,5 +36,15 @@ export {
   type FlujoCompletoResult,
 } from './flujo-completo-admin.bot';
 
+// Comprobante (FASE 1 - Descarga de comprobantes)
+export {
+  MiPlanillaComprobanteBot,
+  getMiPlanillaComprobanteBot,
+  descargarComprobanteMiPlanilla,
+  verificarEstadoPlanillaMiPlanilla,
+  type MiPlanillaComprobanteDownloadResult,
+  type MiPlanillaComprobanteData,
+} from './comprobante.bot';
+
 // Re-export types
 export * from '../../types/miplanilla.types';

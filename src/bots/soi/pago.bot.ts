@@ -436,7 +436,7 @@ export class SOIPagoBot {
    * Navega a la página de gestión de planillas usando el menú interno
    * IMPORTANTE: No usar URLs directas porque se pierde la sesión
    */
-  private async navegarAGestionPlanillas(page: Page): Promise<void> {
+  private async _navegarAGestionPlanillas(page: Page): Promise<void> {
     logger.info('Navigating to planilla management via internal menu');
 
     // Después del login, estamos en el dashboard con planillas disponibles
@@ -488,7 +488,7 @@ export class SOIPagoBot {
    * En el dashboard de SOI, las planillas ya están visibles
    * Solo necesitamos verificar si hay planillas disponibles para pago
    */
-  private async seleccionarPlanillasEnLinea(page: Page): Promise<void> {
+  private async _seleccionarPlanillasEnLinea(page: Page): Promise<void> {
     logger.info('Checking available planillas for payment');
 
     // El dashboard ya muestra "Últimas planillas disponibles"
@@ -516,7 +516,7 @@ export class SOIPagoBot {
    * Busca una planilla y hace click en su botón "Pagar"
    * En el dashboard de SOI, cada planilla tiene un botón "Pagar" directo
    */
-  private async seleccionarPlanilla(
+  private async _seleccionarPlanilla(
     page: Page,
     numeroPlanilla: string
   ): Promise<boolean> {
@@ -618,7 +618,7 @@ export class SOIPagoBot {
   /**
    * Click en el botón continuar
    */
-  private async clickContinuar(page: Page): Promise<void> {
+  private async _clickContinuar(page: Page): Promise<void> {
     logger.info('Clicking continue button');
 
     const continueButton = await this.findClickableElement(page, [
@@ -645,7 +645,7 @@ export class SOIPagoBot {
   /**
    * Acepta términos y condiciones (marca todos los checkboxes requeridos)
    */
-  private async aceptarTerminos(page: Page): Promise<void> {
+  private async _aceptarTerminos(page: Page): Promise<void> {
     logger.info('Accepting terms and conditions');
 
     // Marcar todos los checkboxes disponibles
@@ -690,7 +690,7 @@ export class SOIPagoBot {
   /**
    * Selecciona PSE como método de pago
    */
-  private async seleccionarPSE(page: Page): Promise<void> {
+  private async _seleccionarPSE(page: Page): Promise<void> {
     logger.info('Selecting PSE payment method');
 
     const pseButton = await this.findClickableElement(page, [
@@ -749,7 +749,7 @@ export class SOIPagoBot {
   /**
    * Llena el formulario de datos PSE
    */
-  private async llenarFormularioPSE(
+  private async _llenarFormularioPSE(
     page: Page,
     pseData?: SOIPagoData['pse']
   ): Promise<void> {
@@ -793,7 +793,7 @@ export class SOIPagoBot {
   /**
    * Confirma el pago PSE y obtiene la URL del banco
    */
-  private async confirmarPSE(
+  private async _confirmarPSE(
     page: Page
   ): Promise<{
     success: boolean;

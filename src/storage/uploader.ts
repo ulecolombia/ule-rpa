@@ -29,13 +29,13 @@ export interface ComprobanteMetadata {
 
 /**
  * Servicio de almacenamiento de comprobantes
- * Soporta múltiples backends: local, Vercel Blob, AWS S3
+ * Soporta múltiples backends: local, Supabase, Vercel Blob, AWS S3
  */
 export class StorageUploader {
-  private storageType: 'local' | 'vercel-blob' | 's3';
+  private storageType: 'local' | 'supabase' | 'vercel-blob' | 's3';
 
   constructor() {
-    this.storageType = (process.env.STORAGE_TYPE || 'local') as any;
+    this.storageType = (process.env.STORAGE_TYPE || 'local') as 'local' | 'supabase' | 'vercel-blob' | 's3';
     logger.info('StorageUploader initialized', { storageType: this.storageType });
   }
 
@@ -95,6 +95,10 @@ export class StorageUploader {
       switch (this.storageType) {
         case 'local':
           result = await this.uploadToLocal(localPath, remotePath);
+          break;
+
+        case 'supabase':
+          result = await this.uploadToSupabase(localPath, remotePath, metadata);
           break;
 
         case 'vercel-blob':
@@ -162,6 +166,101 @@ export class StorageUploader {
       url,
       publicId: remotePath,
     };
+  }
+
+  /**
+   * Upload a Supabase Storage
+   * Requiere: npm install @supabase/supabase-js
+   * Variables de entorno:
+   * - SUPABASE_URL (ya debería estar configurado)
+   * - SUPABASE_SERVICE_ROLE_KEY (clave de servicio para bypasear RLS)
+   * - SUPABASE_STORAGE_BUCKET (default: 'comprobantes')
+   *
+   * Configuración en Supabase:
+   * 1. Crear bucket 'comprobantes' en Storage
+   * 2. Configurar policies para acceso público de lectura (si se desea)
+   */
+  private async uploadToSupabase(
+    localPath: string,
+    remotePath: string,
+    metadata: ComprobanteMetadata
+  ): Promise<UploadResult> {
+    logger.info('Uploading to Supabase Storage', { remotePath });
+
+    try {
+      // Requiere: @supabase/supabase-js
+      const { createClient } = await import('@supabase/supabase-js');
+
+      // Validar variables de entorno
+      const supabaseUrl = process.env.SUPABASE_URL;
+      const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      const bucketName = process.env.SUPABASE_STORAGE_BUCKET || 'comprobantes';
+
+      if (!supabaseUrl) {
+        throw new Error('SUPABASE_URL not configured');
+      }
+
+      if (!supabaseKey) {
+        throw new Error('SUPABASE_SERVICE_ROLE_KEY not configured. Use service role key for server-side uploads.');
+      }
+
+      // Crear cliente con service role key para bypasear RLS
+      const supabase = createClient(supabaseUrl, supabaseKey, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      });
+
+      // Leer archivo
+      const fileBuffer = await fs.readFile(localPath);
+      logger.info('File read for Supabase', { size: fileBuffer.length });
+
+      // Upload a Supabase Storage
+      const { data, error } = await supabase.storage
+        .from(bucketName)
+        .upload(remotePath, fileBuffer, {
+          contentType: 'application/pdf',
+          upsert: true, // Sobrescribir si existe
+          cacheControl: '3600', // Cache por 1 hora
+        });
+
+      if (error) {
+        logger.error('Supabase Storage upload error', { error });
+        throw new Error(`Supabase upload failed: ${error.message}`);
+      }
+
+      // Obtener URL pública
+      const { data: publicUrlData } = supabase.storage
+        .from(bucketName)
+        .getPublicUrl(remotePath);
+
+      const publicUrl = publicUrlData.publicUrl;
+
+      logger.info('Supabase Storage upload successful', {
+        path: data.path,
+        publicUrl,
+        userId: metadata.userId,
+        numeroPlanilla: metadata.numeroPlanilla,
+      });
+
+      return {
+        success: true,
+        url: publicUrl,
+        publicId: data.path,
+      };
+    } catch (error) {
+      logger.error('Error uploading to Supabase Storage', { error });
+
+      // Si falla porque no está instalado @supabase/supabase-js
+      if (error instanceof Error && error.message.includes('Cannot find module')) {
+        throw new Error(
+          'Supabase SDK not installed. Run: npm install @supabase/supabase-js'
+        );
+      }
+
+      throw error;
+    }
   }
 
   /**

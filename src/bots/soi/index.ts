@@ -44,10 +44,19 @@ export {
   SOIPagoBot,
   pagarPlanillaSOI,
   verificarPagoSOI,
-  descargarComprobanteSOI,
   type SOIPagoData,
   type SOIPagoResult,
 } from './pago.bot';
+
+// Comprobante (FASE 1 - Descarga de comprobantes)
+export {
+  SOIComprobanteBot,
+  getSOIComprobanteBot,
+  descargarComprobanteSOI,
+  verificarEstadoPlanillaSOI,
+  type ComprobanteDownloadResult,
+  type ComprobanteData,
+} from './comprobante.bot';
 
 // Selectors
 export { SOI_SELECTORS } from './selectors';

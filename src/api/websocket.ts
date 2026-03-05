@@ -46,9 +46,16 @@ let metricsInterval: NodeJS.Timeout | null = null;
 export function initializeWebSocket(app: express.Application): HttpServer {
   const httpServer = createServer(app);
 
+  // Allow both production and development origins
+  const allowedOrigins = [
+    config.ule.apiUrl,
+    'http://localhost:3000',
+    'http://localhost:3001',
+  ].filter(Boolean);
+
   io = new Server(httpServer, {
     cors: {
-      origin: config.ule.apiUrl || 'http://localhost:3000',
+      origin: allowedOrigins,
       methods: ['GET', 'POST'],
       credentials: true,
     },
@@ -156,7 +163,7 @@ export function initializeWebSocket(app: express.Application): HttpServer {
 
   logger.info('WebSocket server initialized', {
     path: '/socket.io/',
-    cors: config.ule.apiUrl,
+    cors: allowedOrigins,
   });
 
   return httpServer;
@@ -754,6 +761,36 @@ export function emitPagoAdminTimeout(data: {
     sessionId: data.sessionId,
   });
   emitToAll('pago-admin:timeout', data);
+}
+
+// ============================================
+// FASE 3: ALERTAS ADMIN
+// ============================================
+
+/**
+ * Emitir alerta a administradores
+ */
+export function emitAdminAlert(alert: {
+  id: string;
+  type: string;
+  severity: string;
+  title: string;
+  message: string;
+  details?: Record<string, unknown>;
+  timestamp: Date;
+}): void {
+  if (!io) return;
+
+  logger.info('Emitting admin alert', {
+    alertId: alert.id,
+    type: alert.type,
+    severity: alert.severity,
+  });
+
+  io.emit('alert:new', {
+    ...alert,
+    timestamp: alert.timestamp.toISOString(),
+  });
 }
 
 // Export io instance for advanced use cases

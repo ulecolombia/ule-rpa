@@ -528,22 +528,68 @@ export class SOIAuthBot {
   private async checkLoginSuccess(page: Page): Promise<boolean> {
     const currentUrl = page.url();
 
-    // Primero verificar si hay mensaje de error visible en la página
+    // PRIMERO: Verificar indicadores positivos de login exitoso
+    // Esto es más confiable que buscar errores
+    const successIndicators = await page.evaluate(() => {
+      const bodyText = document.body.innerText || '';
+      const url = window.location.href;
+
+      // Indicadores positivos de login exitoso en SOI
+      const positivePatterns = [
+        '¡Bienvenido!',
+        'Bienvenido!',
+        'Bienvenido',
+        'Últimas planillas disponibles',
+        'Gestionar Planillas',
+        'Unificar para pago',
+        'Mi perfil',
+        'Aportante',
+        'Cerrar sesión',
+        'Salir',
+      ];
+
+      for (const pattern of positivePatterns) {
+        if (bodyText.includes(pattern)) {
+          return { isLoggedIn: true, indicator: pattern };
+        }
+      }
+
+      // Verificar si estamos en el dashboard (inicio.do)
+      if (url.includes('inicio.do') || url.includes('dashboard') || url.includes('principal')) {
+        return { isLoggedIn: true, indicator: 'dashboard-url' };
+      }
+
+      // Buscar el nombre del usuario en el header (como "Camilo Andres Torres Sandoval")
+      const headerText = document.querySelector('header')?.innerText || '';
+      if (headerText.includes('CC:') || headerText.includes('C.C.')) {
+        return { isLoggedIn: true, indicator: 'user-cc-in-header' };
+      }
+
+      return { isLoggedIn: false, indicator: null };
+    });
+
+    if (successIndicators.isLoggedIn) {
+      logger.info('Login success detected', { indicator: successIndicators.indicator });
+      return true;
+    }
+
+    // SEGUNDO: Verificar mensajes de error específicos (más restrictivos)
     const errorCheck = await page.evaluate(() => {
       const bodyText = document.body.innerText || '';
 
-      // Buscar mensajes de error comunes de SOI
+      // Buscar mensajes de error ESPECÍFICOS de SOI (no genéricos)
       const errorPatterns = [
-        'Error',
         'SEG-', // Códigos de error de seguridad SOI
         'Cuenta de usuario se encuentra deshabilitada',
         'Usuario o contraseña incorrecta',
         'Usuario o clave incorrecta',
-        'no existe',
+        'El usuario no existe',
         'credenciales inválidas',
         'credenciales incorrectas',
         'acceso denegado',
-        'intente nuevamente',
+        'Por favor intente nuevamente',
+        'Error de autenticación',
+        'Datos incorrectos',
       ];
 
       for (const pattern of errorPatterns) {
@@ -552,14 +598,14 @@ export class SOIAuthBot {
         }
       }
 
-      // También buscar elementos de error específicos
+      // Buscar elementos de error específicos (solo clases exactas, no parciales)
       const errorElements = document.querySelectorAll(
-        '.alert-danger, .error, .mensaje-error, [class*="error"], [class*="Error"]'
+        '.alert-danger, .alert-error, .mensaje-error, .error-message'
       );
 
       for (const el of errorElements) {
         const text = el.textContent?.trim();
-        if (text && text.length > 0) {
+        if (text && text.length > 5) { // Ignorar textos muy cortos
           return { hasError: true, errorText: text };
         }
       }
@@ -572,33 +618,21 @@ export class SOIAuthBot {
       return false;
     }
 
-    // Si seguimos en la página de login (index.do o similar), probablemente falló
-    if (currentUrl.includes('index.do') || currentUrl.includes('login')) {
-      // Ya verificamos errores arriba, pero si seguimos en login sin error visible,
-      // puede que simplemente no se haya enviado el formulario
+    // Si seguimos en la página de login (index.do) sin indicadores de éxito
+    if (currentUrl.includes('index.do') && !currentUrl.includes('inicio')) {
       return false;
     }
 
-    // Verificar si hay elementos que indican sesión activa
-    const isLoggedIn = await page.evaluate(() => {
-      // Buscar indicadores de sesión activa
-      const userInfo = document.querySelector(
-        '.user-info, .usuario-logueado, [class*="userName"]'
-      );
-      const logoutLink = document.querySelector('a[href*="logout"]');
-      const salirButton = Array.from(document.querySelectorAll('button, a')).find(
-        el => el.textContent?.toLowerCase().includes('salir')
-      );
-      const mainMenu = document.querySelector(
-        '.menu-principal, .menu-aportante, nav'
-      );
-      // Verificar si estamos en la página de inicio (dashboard)
-      const isDashboard = window.location.href.includes('inicio.do');
+    // TERCERO: Verificar elementos de sesión activa como fallback
+    const hasSessionElements = await page.evaluate(() => {
+      const logoutLink = document.querySelector('a[href*="logout"], a[href*="salir"]');
+      const mainMenu = document.querySelector('.menu-principal, .menu-aportante, .sidebar');
+      const navItems = document.querySelectorAll('nav a, .nav-item');
 
-      return !!(userInfo || logoutLink || salirButton || mainMenu || isDashboard);
+      return !!(logoutLink || mainMenu || navItems.length > 3);
     });
 
-    return isLoggedIn;
+    return hasSessionElements;
   }
 
   /**
@@ -657,10 +691,48 @@ export class SOIAuthBot {
    */
   private async getLoggedUserName(page: Page): Promise<string> {
     const userName = await page.evaluate(() => {
-      const userElement = document.querySelector(
-        '.user-info, .usuario-logueado, [class*="userName"]'
-      );
-      return userElement?.textContent?.trim() || 'Unknown';
+      // Estrategia 1: Buscar en el header el nombre del usuario
+      // En SOI el nombre aparece así: "Camilo Andres Torres Sandoval\nCC: 1018482146"
+      const header = document.querySelector('header');
+      if (header) {
+        const headerText = header.innerText;
+        // El nombre suele estar antes de "CC:" o "C.C."
+        const ccIndex = headerText.indexOf('CC:');
+        if (ccIndex > 0) {
+          const namePart = headerText.substring(0, ccIndex).trim();
+          // Tomar solo la primera línea si hay múltiples
+          const firstName = namePart.split('\n').pop()?.trim();
+          if (firstName && firstName.length > 3) {
+            return firstName;
+          }
+        }
+      }
+
+      // Estrategia 2: Buscar elementos específicos de usuario
+      const userSelectors = [
+        '.user-name',
+        '.nombre-usuario',
+        '.user-info',
+        '.usuario-logueado',
+        '[class*="userName"]',
+      ];
+
+      for (const selector of userSelectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+
+      // Estrategia 3: Buscar texto que parezca un nombre (mayúsculas iniciales)
+      const bodyText = document.body.innerText;
+      const namePattern = /([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+ ){2,4}[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+/;
+      const match = bodyText.match(namePattern);
+      if (match && match[0].length < 50) {
+        return match[0];
+      }
+
+      return 'Usuario SOI';
     });
     return userName;
   }

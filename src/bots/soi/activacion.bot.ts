@@ -105,7 +105,18 @@ export class SOIActivacionBot {
 
       // Verificar si ya está activada o hay error
       const pageContent = await this.page.content();
-      if (pageContent.includes('ya ha sido activada') || pageContent.includes('cuenta activa')) {
+
+      // Error SEG-07014: Token inválido o inactivo = cuenta ya fue activada
+      if (pageContent.includes('SEG-07014')) {
+        logger.info('Account already activated (token consumed)', { documento: data.numeroDocumento });
+        return {
+          success: true,
+          accountActivated: true,
+          message: 'Cuenta ya fue activada previamente - link consumido',
+        };
+      }
+
+      if (pageContent.includes('ya ha sido activada') || pageContent.includes('cuenta activa') || pageContent.includes('ha sido activada')) {
         logger.info('Account already activated');
         return {
           success: true,
@@ -271,6 +282,14 @@ export class SOIActivacionBot {
     if (!this.page) return false;
 
     try {
+      // Primero intentar el botón específico de SOI: "Asignar Clave y Continuar"
+      const soiButton = await this.page.$('input[value="Asignar Clave y Continuar"]');
+      if (soiButton) {
+        await soiButton.click();
+        logger.info('Submit button clicked', { selector: 'input[value="Asignar Clave y Continuar"]' });
+        return true;
+      }
+
       // Buscar botón por múltiples estrategias
       const buttonSelectors = [
         ACTIVATION_SELECTORS.SOI_SUBMIT,
@@ -307,13 +326,13 @@ export class SOIActivacionBot {
         }
       }
 
-      // Intento alternativo: buscar por texto
+      // Intento alternativo: buscar por texto "Asignar" o textos comunes
       const clickedByText = await this.page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-        const targetTexts = ['guardar', 'crear', 'activar', 'enviar', 'confirmar', 'aceptar'];
+        const inputs = Array.from(document.querySelectorAll('input[type="button"], input[type="submit"], button'));
+        const targetTexts = ['asignar', 'guardar', 'crear', 'activar', 'enviar', 'confirmar', 'aceptar'];
 
-        for (const btn of buttons) {
-          const text = (btn.textContent || (btn as HTMLInputElement).value || '').toLowerCase();
+        for (const btn of inputs) {
+          const text = ((btn as HTMLInputElement).value || btn.textContent || '').toLowerCase();
           if (targetTexts.some(t => text.includes(t))) {
             (btn as HTMLElement).click();
             return true;

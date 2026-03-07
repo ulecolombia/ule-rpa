@@ -102,6 +102,7 @@ enum EnlaceUserStatus {
   REGISTERING // Bot está registrando
   REGISTERED // Registrado exitosamente
   ERROR // Error en registro
+  REQUIRES_MANUAL_REVIEW // Ambos operadores fallaron, requiere atención manual
 }
 
 // Estado de cuenta SOI del usuario

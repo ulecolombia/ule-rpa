@@ -1,15 +1,26 @@
 /**
  * Mi Planilla Login - Quick Test
  */
+import dotenv from 'dotenv';
+dotenv.config();
+
 import { MiPlanillaAuthBot } from '../src/bots/miplanilla/auth.bot';
 
 async function test() {
   console.log('\n========== MI PLANILLA LOGIN TEST ==========\n');
 
+  const documento = process.env.TEST_MIPLANILLA_DOCUMENTO;
+  const password = process.env.TEST_MIPLANILLA_PASSWORD;
+
+  if (!documento || !password) {
+    console.error('❌ Missing credentials. Set TEST_MIPLANILLA_DOCUMENTO and TEST_MIPLANILLA_PASSWORD in .env');
+    process.exit(1);
+  }
+
   const credentials = {
     tipoDocumento: 'CC' as const,
-    documento: '1047484978',
-    password: 'Ulecolombia123',
+    documento,
+    password,
   };
 
   console.log('Usuario: CC' + credentials.documento);

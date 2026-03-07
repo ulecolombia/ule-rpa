@@ -1,7 +1,7 @@
 # CLAUDE.md - Contexto Completo del Proyecto ULE RPA Service
 
-**Fecha**: 2026-03-04
-**Versión**: 1.1
+**Fecha**: 2026-03-07
+**Versión**: 1.2
 **Propósito**: Documentación comprensiva para mantener contexto de IA entre sesiones
 
 ---
@@ -83,6 +83,10 @@ Este es un servicio RPA (Robotic Process Automation) que automatiza la liquidaci
 9. [Credenciales y Configuración](#9-credenciales-y-configuración)
 10. [Errores Comunes y Soluciones](#10-errores-comunes-y-soluciones)
 11. [Comandos Útiles](#11-comandos-útiles)
+12. [Selectores Verificados SOI (2026-03-07)](#12-selectores-verificados-soi-2026-03-07)
+13. [Comportamientos Especiales SOI](#13-comportamientos-especiales-soi)
+14. [Estado de Implementación](#14-estado-de-implementación)
+15. [Reglas Críticas de Desarrollo](#15-reglas-críticas-de-desarrollo)
 
 ---
 
@@ -840,4 +844,363 @@ Mac Desarrollo          GitHub              Mac Servidor
 
 ---
 
-**Última actualización**: 2026-03-04
+## 12. SELECTORES VERIFICADOS SOI (2026-03-07)
+
+> ⚠️ **IMPORTANTE**: Estos selectores fueron verificados directamente en el DOM de SOI.
+> NO inventar selectores — siempre verificar con `page.$eval()` o inspeccionar el DOM real.
+
+### Crear Planilla - Paso 1 (Información Básica)
+```typescript
+// Estos campos ya vienen correctos, NO modificar:
+// - Tipo Aportante: 02-INDEPENDIENTE
+// - Clase Aportante: I-INDEPENDIENTE
+// - Naturaleza Jurídica: PRIVADA
+// - Forma de Presentación: ÚNICO
+// - Aportante Exonerado: NO
+
+// Campos a configurar:
+TIPO_PLANILLA: 'select[name="tipoPlanilla"]'     // Seleccionar "I" (I-INDEPENDIENTES)
+PERIODO_MES: '#periodoLiquidacionMes'            // value: "1"-"12"
+PERIODO_ANIO: '#periodoLiquidacionAnnio'         // value: "2026"
+BTN_SIGUIENTE: '#siguiente1'                      // O 'input[value="Siguiente"]'
+```
+
+### Crear Planilla - Paso 2 (Agregar Cotizante)
+```typescript
+// ⚠️ El botón "Agregar cotizante" está OCULTO (display: none)
+// Usar JavaScript directo en lugar de click:
+BTN_AGREGAR_COTIZANTE: 'input[onclick*="agregarCotizante"]'  // display: none!
+
+// Ejecutar así:
+await page.evaluate(() => {
+  (window as any).agregarCotizante();  // Llamar función JS directamente
+});
+```
+
+### Popup Cotizante - Sub-paso 1 (Información Básica)
+```typescript
+TIPO_DOCUMENTO: 'select[name="tipoIdentificacionCotizante"]'
+NUMERO_DOCUMENTO: 'input[name="numeroIdentificacionCotizante"]'
+
+// ⚠️ NOMBRES se autocompletan desde BDUA después del blur en documento
+PRIMER_NOMBRE: 'input[name="primerNombreCotizante"]'      // READONLY - viene de BDUA
+PRIMER_APELLIDO: 'input[name="primerApellidoCotizante"]'  // READONLY - viene de BDUA
+
+// ⚠️ TIPO COTIZANTE tiene formato especial "id,codigo"
+TIPO_COTIZANTE: 'select[name="tipoCotizante"]'
+// Valores: "3,3" = 3-INDEPENDIENTE, "16,33" = 33-BENEFICIARIO FSP, etc.
+
+// Ubicación - también tienen formato "id-codigo"
+DEPARTAMENTO: 'select[name="departamento"]'   // Ej: "38,13" = BOLIVAR
+MUNICIPIO: 'select[name="municipio"]'         // Ej: "1140-13001" = CARTAGENA
+
+BTN_SIGUIENTE: 'input#siguiente2'
+```
+
+### Popup Cotizante - Sub-paso 3 (Seguridad Social)
+```typescript
+// ⚠️ TYPO INTENCIONAL DE SOI - El campo se llama "sarioBasico" NO "salarioBasico"
+SALARIO_BASICO: 'input[name="sarioBasico"]'   // TYPO! No es salarioBasico
+
+// ⚠️ AFP y EPS vienen DISABLED del RUAF - NO intentar cambiarlos
+AFP: 'select[name="administradoraPension"]'   // DISABLED - prellenado
+EPS: 'select[name="administradoraSalud"]'     // DISABLED - prellenado
+
+// IBC es READONLY - se calcula automáticamente
+IBC_PENSION: 'input[name="ibcPension"]'       // READONLY
+IBC_SALUD: 'input[name="ibcSalud"]'           // READONLY
+
+// Días cotizados - verificar que sea 30
+DIAS_PENSION: 'input[name="numeroDiasCotizadosPension"]'
+DIAS_SALUD: 'input[name="numeroDiasCotizadosSalud"]'
+
+// Tarifas - ya vienen correctas, NO modificar
+TARIFA_PENSION: 'select[name="tarifaPension"]'  // 0.16 (16%)
+TARIFA_SALUD: 'select[name="tarifaSalud"]'      // 0.125 (12.5%)
+```
+
+### Pago PSE - Advertencia PSE-04006
+```typescript
+// Después de click en "Pagar", aparece diálogo de confirmación
+// ⚠️ SIEMPRE hacer click en "Sí" para continuar
+
+// El diálogo usa JavaScript confirm() o un modal
+// Buscar botón "Sí" con estos selectores:
+DIALOGO_SI: 'input[value="Sí"]'
+DIALOGO_SI_ALT: 'button:contains("Sí")'  // Puppeteer no soporta :contains
+// En Puppeteer usar: page.evaluate(() => document.querySelector('button')?.click())
+```
+
+### Consulta de Planillas - Página de Comprobantes (Verificado 2026-03-07)
+```typescript
+// ⚠️ IMPORTANTE: Los tabs "Específica" y "General" son DECORATIVOS
+// Los TDs con clase 'boton-act'/'boton-inact' NO tienen onclick
+
+// TABS (solo visuales, no clickeables):
+TD_ESPECIFICA: '#tdBusquedaEsp'           // class: 'boton-act borde-boton' (activo)
+TD_GENERAL: '#tdBusquedaGen'              // class: 'boton-inact borde-boton' (inactivo)
+
+// BOTONES REALES (estos son los que funcionan):
+BTN_BUSCAR_ESPECIFICA: '#buscarEspecifica1'  // Para búsqueda por número de planilla
+BTN_BUSCAR_GENERAL: '#buscarGeneral1'        // Para búsqueda por período (año/mes)
+
+// ⚠️ Para búsqueda por período, usar #buscarGeneral1 (NO el TD visual)
+
+// SELECTORES DE PERÍODO (aparecen después del primer click en buscarGeneral1):
+OTROS_SUBS_ANIO: 'select[name="periodoLiqOtrosSubsAnnio"]'  // 2003-2026
+OTROS_SUBS_MES: 'select[name="periodoLiqOtrosSubsMes"]'    // 1-12 (ENERO-DICIEMBRE)
+SALUD_ANIO: 'select[name="periodoLiqSaludAnnio"]'          // 2003-2026
+SALUD_MES: 'select[name="periodoLiqSaludMes"]'             // 1-12 (ENERO-DICIEMBRE)
+
+// ⚠️ IMPORTANTE: Setear los 4 selectores CON EL MISMO VALOR de año/mes
+// Los eventos onchange pueden resetear otros selectores
+// Usar $eval SIN dispatchEvent para evitar interferencias:
+await page.$eval('select[name="periodoLiqOtrosSubsAnnio"]', (el, val) => {
+  (el as HTMLSelectElement).value = val;
+}, '2026');
+
+// COLUMNA SOPORTE PAGO (click para descargar):
+IMG_SOPORTE_PAGO: 'img[onclick*="descargarSoportePago"]'   // ¡CORRECTO!
+IMG_COMPROBANTE_PAGO: 'img[onclick*="descargarComprobante"]' // NO USAR - diferente documento
+
+// ⚠️ Usar 'descargarSoportePago', NO 'descargarComprobante'
+
+// PÁGINA DE DESCARGA (soportePagoInicio.do):
+// Texto: "Para descargar su(s) soporte(s) de pago haga clic aquí:"
+PDF_ICON: 'img[onclick*="generarSoportePago"]'  // Click para descargar PDF
+```
+
+### Flujo Correcto de Consulta de Planillas
+```
+1. Navegar a: Consultas > Activos > Ver marzo 2017 en adelante
+2. Click en #buscarGeneral1 (activa tab General con selectores)
+3. Configurar los 4 selectores de período (MISMO año y mes)
+4. Click en #buscarGeneral1 otra vez (ejecuta la búsqueda)
+5. Buscar fila con número de planilla
+6. Click en img con onclick "descargarSoportePago"
+7. En página soportePagoInicio.do, click en PDF icon
+8. Esperar descarga
+```
+
+---
+
+## 13. COMPORTAMIENTOS ESPECIALES SOI
+
+### Planilla GUARDADA Existente
+SOI muestra planillas existentes en el dashboard después del login.
+El bot DEBE verificar si ya existe una planilla GUARDADA para el periodo antes de crear una nueva.
+
+```typescript
+// En checkPlanillaExistente():
+// 1. Verificar tabla "Últimas planillas disponibles"
+// 2. Buscar fila con: Tipo="I", Estado="GUARDADA", Periodo="2026-02"
+// 3. Si existe: retornar { existe: true, numeroPlanilla, totalPagar }
+// 4. Si no existe: continuar con creación
+```
+
+### Popup Cotizante - Detección con Polling
+El popup de cotizante NO dispara evento `targetcreated` de forma confiable.
+Usar polling en lugar de eventos:
+
+```typescript
+// ❌ NO FUNCIONA BIEN:
+browser.once('targetcreated', async (target) => { ... });
+
+// ✅ USAR POLLING:
+for (let i = 0; i < 15; i++) {
+  await page.waitForTimeout(1000);
+  const pages = await browser.pages();
+  for (const p of pages) {
+    if (p.url().includes('ingresarCotizante')) {
+      return p;  // Popup encontrado
+    }
+  }
+}
+```
+
+### Navegación del Popup al Seleccionar tipoCotizante
+Cuando se selecciona tipoCotizante (ej: "3,3"), el popup NAVEGA a otra URL.
+Esto es comportamiento NORMAL, no un error.
+
+```typescript
+// URLs válidas del wizard de cotizante:
+// - ingresarCotizante.do  (paso inicial)
+// - informacionBasica.do  (después de seleccionar tipoCotizante)
+// - novedades.do
+// - seguridadSocial.do
+// - parafiscales.do
+// - resumen.do
+
+// Verificar que siga en el wizard:
+const validUrls = ['ingresarCotizante', 'informacionBasica', 'cotizante', 'novedades', 'seguridadSocial'];
+const isValid = validUrls.some(url => popup.url().includes(url));
+```
+
+### Autocomplete BDUA
+Después de ingresar la cédula y hacer blur, SOI consulta BDUA y autocompleta:
+- Nombres y apellidos
+- AFP (administradora de pensión)
+- EPS (administradora de salud)
+
+```typescript
+// Esperar autocomplete después del blur:
+await page.type('input[name="numeroIdentificacionCotizante"]', cedula);
+await page.evaluate(() => {
+  const input = document.querySelector('input[name="numeroIdentificacionCotizante"]');
+  input?.blur();
+  input?.dispatchEvent(new Event('blur', { bubbles: true }));
+});
+
+// Esperar que se llene el primer nombre (máx 8 segundos)
+await page.waitForFunction(
+  () => (document.querySelector('input[name="primerNombreCotizante"]') as HTMLInputElement)?.value?.length > 0,
+  { timeout: 8000 }
+);
+```
+
+---
+
+## 14. ESTADO DE IMPLEMENTACIÓN
+
+### SOI (servicio.nuevosoi.com.co)
+
+| Funcionalidad | Estado | Archivo | Notas |
+|--------------|--------|---------|-------|
+| Login independientes | ✅ FUNCIONANDO | `auth.bot.ts` | - |
+| Registro cuenta | ✅ FUNCIONANDO | `registro.bot.ts` | Incluye activación por email |
+| Crear planilla | ✅ FUNCIONANDO | `planilla.bot.ts` | Flujo completo con 5 sub-pasos |
+| Detectar planilla existente | ✅ FUNCIONANDO | `planilla.bot.ts` | Reutiliza si ya existe |
+| Pago PSE | ⏳ PENDIENTE | `pago.bot.ts` | Falta implementar |
+| Descarga comprobante | ⏳ PENDIENTE | - | Falta implementar |
+
+### Mi Planilla (miplanilla.com)
+
+| Funcionalidad | Estado | Archivo | Notas |
+|--------------|--------|---------|-------|
+| Login | ✅ FUNCIONANDO | `auth.bot.ts` | Usuario = CC + documento |
+| Crear planilla | ⚠️ PARCIAL | `liquidacion.bot.ts` | Depende de perfil configurado |
+| Pago PSE admin-controlled | ⚠️ PARCIAL | `pago-admin-controlled.bot.ts` | Necesita testing |
+| Flujo completo | ⏳ PENDIENTE | `flujo-completo-admin.bot.ts` | En desarrollo |
+
+### Planilla Creada Exitosamente (2026-03-07)
+```
+Número: 6010795958
+Periodo: FEBRERO 2026
+Total: $570.000
+Estado: GUARDADA (lista para pago PSE)
+Usuario: Camilo Andres Maturana Mejia (CC 1047478670)
+```
+
+---
+
+## 15. REGLAS CRÍTICAS DE DESARROLLO
+
+### ❌ NUNCA HACER
+
+1. **NUNCA usar `waitForTimeout` como único mecanismo de espera**
+   ```typescript
+   // ❌ MAL
+   await page.waitForTimeout(5000);
+   await page.click('#boton');
+
+   // ✅ BIEN
+   await page.waitForSelector('#boton', { visible: true, timeout: 5000 });
+   await page.click('#boton');
+   ```
+
+2. **NUNCA inventar selectores sin verificar**
+   ```typescript
+   // ❌ MAL - Asumiendo que existe
+   await page.click('#btnGuardarPlanilla');
+
+   // ✅ BIEN - Verificar primero
+   const btn = await page.$('#btnGuardarPlanilla');
+   if (!btn) {
+     const html = await page.evaluate(() => document.body.innerHTML.substring(0, 500));
+     logger.error('Botón no encontrado. HTML:', html);
+     throw new Error('Selector no encontrado');
+   }
+   ```
+
+3. **NUNCA usar selectores de Playwright en Puppeteer**
+   ```typescript
+   // ❌ MAL - Sintaxis de Playwright
+   await page.click('button:has-text("Siguiente")');
+   await page.click('text=Guardar');
+
+   // ✅ BIEN - Puppeteer puro
+   await page.click('input[value="Siguiente"]');
+   await page.evaluate(() => {
+     const btns = Array.from(document.querySelectorAll('button'));
+     const btn = btns.find(b => b.textContent?.includes('Guardar'));
+     btn?.click();
+   });
+   ```
+
+### ✅ SIEMPRE HACER
+
+1. **SIEMPRE tomar screenshots en cada paso**
+   ```typescript
+   await takeScreenshot(page, 'paso1_antes');
+   // ... acción ...
+   await takeScreenshot(page, 'paso1_despues');
+   ```
+
+2. **SIEMPRE usar `headless: false` en desarrollo**
+   ```typescript
+   const browserManager = new BrowserManager({ headless: false });
+   ```
+
+3. **SIEMPRE verificar que el elemento existe antes de interactuar**
+   ```typescript
+   const element = await page.$(selector);
+   if (!element) {
+     await takeScreenshot(page, 'error_elemento_no_encontrado');
+     throw new Error(`Elemento no encontrado: ${selector}`);
+   }
+   ```
+
+4. **SIEMPRE esperar después de acciones que disparan AJAX**
+   ```typescript
+   await page.select('select[name="departamento"]', value);
+   await page.waitForTimeout(1000);  // Esperar que municipio cargue
+   await waitForSelectOptions(page, 'select[name="municipio"]');
+   ```
+
+5. **SIEMPRE loggear el estado antes de fallar**
+   ```typescript
+   try {
+     await page.click(selector);
+   } catch (error) {
+     const url = page.url();
+     const html = await page.evaluate(() => document.body.innerHTML.substring(0, 1000));
+     logger.error('Error en click', { selector, url, htmlPreview: html });
+     await takeScreenshot(page, 'error_click');
+     throw error;
+   }
+   ```
+
+### Patrón de setSelectValue Robusto
+```typescript
+async function setSelectValue(page: Page, selector: string, value: string): Promise<boolean> {
+  // 1. Obtener opciones disponibles
+  const options = await page.evaluate((sel) => {
+    const select = document.querySelector(sel) as HTMLSelectElement;
+    return Array.from(select?.options || []).map(o => ({ value: o.value, text: o.text }));
+  }, selector);
+
+  logger.info(`Opciones disponibles: ${JSON.stringify(options)}`);
+
+  // 2. Buscar en orden de prioridad:
+  //    a) Match exacto por value
+  //    b) Match exacto por texto
+  //    c) Match parcial (startsWith)
+
+  // 3. Seleccionar y verificar
+  // 4. Retornar true/false
+}
+```
+
+---
+
+**Última actualización**: 2026-03-07

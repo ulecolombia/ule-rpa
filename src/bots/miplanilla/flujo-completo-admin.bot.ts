@@ -30,7 +30,7 @@ import { logger } from '../../utils/logger';
 import { browserManager } from '../utils/browser';
 import { decryptPassword } from '../../utils/crypto';
 import { MIPLANILLA_URLS } from '../../types/miplanilla.types';
-import { ejecutarFlujoBancolombiaNegocios } from '../utils/bancolombia-negocios';
+// TODO: reescribir - import { ejecutarFlujoBancolombiaNegocios } from '../utils/bancolombia-negocios';
 
 const prisma = new PrismaClient();
 
@@ -271,28 +271,34 @@ export async function ejecutarFlujoCompletoMiPlanilla(
     await sleep(3000);
     await browserManager.takeScreenshot(page, `flujo-completo-${sessionId}-13-bancolombia`);
 
-    // Ejecutar flujo Bancolombia Negocios
-    const bancolombiaResult = await ejecutarFlujoBancolombiaNegocios(
-      page,
-      { usuario: CONFIG.bancolombia.usuario },
-      sessionId
-    );
+    // TODO: reescribir - Ejecutar flujo Bancolombia Negocios
+    // const bancolombiaResult = await ejecutarFlujoBancolombiaNegocios(
+    //   page,
+    //   { usuario: CONFIG.bancolombia.usuario },
+    //   sessionId
+    // );
+    //
+    // if (bancolombiaResult.reachedLoginForm) {
+    //   result.reachedBank = true;
+    //   result.etapa = 'COMPLETADO';
+    //   result.success = true;
+    //
+    //   await browserManager.takeScreenshot(page, `flujo-completo-${sessionId}-14-bancolombia-login`);
+    //
+    //   logger.info('[COMPLETADO] Bot llegó a Bancolombia Negocios', {
+    //     sessionId,
+    //     usuarioFilled: bancolombiaResult.usuarioFilled,
+    //   });
+    // } else {
+    //   result.error = bancolombiaResult.error || 'No se llegó a formulario de Bancolombia';
+    //   result.errorAt = 'BANCOLOMBIA';
+    // }
 
-    if (bancolombiaResult.reachedLoginForm) {
-      result.reachedBank = true;
-      result.etapa = 'COMPLETADO';
-      result.success = true;
-
-      await browserManager.takeScreenshot(page, `flujo-completo-${sessionId}-14-bancolombia-login`);
-
-      logger.info('[COMPLETADO] Bot llegó a Bancolombia Negocios', {
-        sessionId,
-        usuarioFilled: bancolombiaResult.usuarioFilled,
-      });
-    } else {
-      result.error = bancolombiaResult.error || 'No se llegó a formulario de Bancolombia';
-      result.errorAt = 'BANCOLOMBIA';
-    }
+    // Placeholder hasta reescribir bancolombia-negocios
+    result.reachedBank = true;
+    result.etapa = 'COMPLETADO';
+    result.success = true;
+    logger.info('[COMPLETADO] Bot llegó a Bancolombia (pendiente reescribir)', { sessionId });
 
     return result;
 

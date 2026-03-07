@@ -126,6 +126,17 @@ export class SOIAccountActivationService {
       });
 
       // 5. Procesar resultado
+      // Si la cuenta ya estaba activada (SEG-07014), retornar éxito sin password
+      if (activationResult.accountActivated && !activationResult.generatedPassword) {
+        logger.info('Account was already activated', { documento });
+        return {
+          success: true,
+          email: activationEmail,
+          activation: activationResult,
+          message: activationResult.message || 'Cuenta ya estaba activada previamente',
+        };
+      }
+
       if (!activationResult.success || !activationResult.generatedPassword) {
         return {
           success: false,

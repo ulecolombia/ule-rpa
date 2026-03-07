@@ -22,31 +22,30 @@ export {
   type SOIRegistrationResult,
 } from './registro.bot';
 
-// Liquidación (legacy)
-export {
-  SOILiquidacionBot,
-  liquidarPlanillaSOI,
-  liquidarPlanillaAsUser,
-  type SOILiquidacionData,
-  type SOILiquidacionResult,
-} from './liquidacion.bot';
+// TODO: reescribir - Liquidación (legacy)
+// export {
+//   SOILiquidacionBot,
+//   liquidarPlanillaSOI,
+//   liquidarPlanillaAsUser,
+//   type SOILiquidacionData,
+//   type SOILiquidacionResult,
+// } from './liquidacion.bot';
 
-// Crear Planilla (nuevo - flujo completo con IBC)
+// Crear Planilla (nuevo - flujo limpio)
 export {
-  SOICrearPlanillaBot,
   crearPlanillaSOI,
-  type CrearPlanillaResult,
-  type CrearPlanillaOptions,
-} from './crear-planilla.bot';
+  type PlanillaInput,
+  type PlanillaResult,
+} from './planilla.bot';
 
-// Pago
-export {
-  SOIPagoBot,
-  pagarPlanillaSOI,
-  verificarPagoSOI,
-  type SOIPagoData,
-  type SOIPagoResult,
-} from './pago.bot';
+// TODO: reescribir - Pago
+// export {
+//   SOIPagoBot,
+//   pagarPlanillaSOI,
+//   verificarPagoSOI,
+//   type SOIPagoData,
+//   type SOIPagoResult,
+// } from './pago.bot';
 
 // Comprobante (FASE 1 - Descarga de comprobantes)
 export {

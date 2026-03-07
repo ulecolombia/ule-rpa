@@ -5,33 +5,43 @@
 
 import { Worker, Job } from 'bullmq';
 import { PrismaClient } from '@prisma/client';
-import { redisConnection, moveToDeadLetter } from './queue.config';
+import { redisConnection, moveToDeadLetter, addActivacionTask } from './queue.config';
 import { logger, createChildLogger } from '../utils/logger';
 // config removed - pilaOperator no longer used after Enlace removal
 import { TaskInput, TaskResult } from '../types';
 
 // SOI imports
 import {
-  registrarUsuarioSOI,
-  pagarPlanillaSOI,
-  SOIUserData,
-  SOIPagoData,
+  crearCuentaSOI, // Función correcta para auto-registro de independientes
+  // TODO: reescribir - pagarPlanillaSOI,
+  // TODO: reescribir - SOIPagoData,
   // Nuevo bot de crear planilla con IBC
   SOIAuthBot,
-  SOICrearPlanillaBot,
+  // TODO: reescribir - SOICrearPlanillaBot,
   // FASE 1: Comprobante bot
   descargarComprobanteSOI,
   verificarEstadoPlanillaSOI,
 } from '../bots/soi';
+import type { SOIUserRegistration, SOIAccountCreationResult } from '../types/soi.types';
 
-// Mi Planilla imports - FASE 1: Comprobante support
+// Mi Planilla imports - FASE 1: Comprobante support + FASE 2: Registro fallback
 import {
   descargarComprobanteMiPlanilla,
   verificarEstadoPlanillaMiPlanilla,
+  registrarUsuarioMiPlanilla,
 } from '../bots/miplanilla';
+import type { MiPlanillaRegistro, MiPlanillaRegistroResult } from '../types/miplanilla.types';
+import { encryptPassword } from '../utils/crypto';
 
 import type { SOIPlanillaLiquidacion } from '../types/soi-planilla.types';
 import { decryptPassword } from '../utils/crypto';
+
+// Árbol de decisión para verificar estado de planillas
+import {
+  verificarEstadoPlanillaSOI as verificarEstadoSOI,
+  aplicarArbolDecision,
+  type AccionRecomendada,
+} from '../bots/utils/planilla-state';
 
 // Storage uploader - FASE 1: Enabled for comprobante upload
 import { uploadComprobanteToStorage } from '../storage/uploader';
@@ -165,115 +175,372 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           throw new Error('userData is required for REGISTRO task');
         }
 
-        // SOI is the only supported operator
-        const pilaOperator = 'soi';
-        jobLogger.info('Using PILA operator: SOI');
-
-        // Log de inicio
-        await logTaskProgress(task.id, 'INFO', 'Starting user registration via SOI', {
-          documento: userData.numeroDocumento,
-          nombre: userData.nombre,
-          operator: pilaOperator,
-        });
-
+        // Variables para tracking del fallback
+        let finalOperator: 'SOI' | 'MI_PLANILLA' | null = null;
+        let soiError: string | null = null;
+        let miPlanillaError: string | null = null;
+        let registroExitoso = false;
         let registroResult: {
           success: boolean;
           enlaceUserId?: string;
           alreadyExists?: boolean;
           warnings?: string[];
           error?: string;
-        };
+          generatedPassword?: string;
+        } = { success: false };
 
-        // === SOI Registration (sin reCAPTCHA) ===
-        const soiUserData: SOIUserData = {
-          tipoDocumento: userData.tipoDocumento || 'CC',
-          numeroDocumento: userData.numeroDocumento,
-          nombres: userData.nombre?.split(' ')[0] || userData.nombre,
-          apellidos: userData.nombre?.split(' ').slice(1).join(' ') || '',
-          departamento: userData.departamento || 'BOGOTA D.C.',
-          municipio: userData.municipio || 'BOGOTA D.C.',
-          telefono: userData.telefono,
-          celular: userData.celular,
-          correo: userData.correo || userData.email,
-          enviarSMS: true,
-          rolSOI: 'APORTANTE',
-          activo: true,
-        };
-
-        const soiResult = await registrarUsuarioSOI(soiUserData);
-
-        registroResult = {
-          success: soiResult.success,
-          enlaceUserId: soiResult.usuarioId,
-          alreadyExists: soiResult.alreadyExists,
-          warnings: soiResult.warnings,
-          error: soiResult.error,
-        };
-
-        if (!registroResult.success) {
-          throw new Error(registroResult.error || 'Registration failed');
-        }
-
-        // Guardar usuario en tabla EnlaceUser (mantener compatibilidad)
-        const enlaceUser = await prisma.enlaceUser.upsert({
-          where: { uleUserId },
-          create: {
-            uleUserId,
-            tipoDocumento: userData.tipoDocumento,
-            numeroDocumento: userData.numeroDocumento,
-            nombre: userData.nombre,
-            eps: userData.eps,
-            pension: userData.pension,
-            arl: userData.arl,
-            enlaceUserId: registroResult.enlaceUserId,
-            enlaceStatus: 'REGISTERED',
-            registeredAt: new Date(),
-            lastSyncAt: new Date(),
-          },
-          update: {
-            enlaceUserId: registroResult.enlaceUserId,
-            enlaceStatus: 'REGISTERED',
-            nombre: userData.nombre,
-            eps: userData.eps,
-            pension: userData.pension,
-            arl: userData.arl,
-            lastSyncAt: new Date(),
-          },
+        // ═══════════════════════════════════════════════════════════════
+        // PASO 1: Intentar registro en SOI (operador preferido)
+        // Usa crearCuentaSOI() que navega al formulario público de auto-registro
+        // ═══════════════════════════════════════════════════════════════
+        jobLogger.info('REGISTRO: Attempting SOI registration (auto-registro independientes)');
+        await logTaskProgress(task.id, 'INFO', 'Intentando registro en SOI (auto-registro independientes)', {
+          documento: userData.numeroDocumento,
+          nombre: userData.nombre,
         });
 
-        // Log de éxito
-        await logTaskProgress(
-          task.id,
-          'INFO',
-          registroResult.alreadyExists
-            ? `User already existed in ${pilaOperator.toUpperCase()}`
-            : `User registered successfully in ${pilaOperator.toUpperCase()}`,
-          {
-            enlaceUserId: registroResult.enlaceUserId,
-            alreadyExists: registroResult.alreadyExists,
-            warnings: registroResult.warnings,
-            operator: pilaOperator,
-          }
-        );
+        // Preparar datos para el formulario de auto-registro de SOI
+        const nombreParts = (userData.nombre || '').split(' ');
+        const soiUserData: SOIUserRegistration = {
+          tipoDocumento: (userData.tipoDocumento as 'CC' | 'CE' | 'NIT' | 'PA' | 'TI' | 'RC') || 'CC',
+          documento: userData.numeroDocumento,
+          nombres: nombreParts[0] || userData.nombre,
+          apellidos: nombreParts.slice(1).join(' ') || '',
+          departamento: userData.departamento || 'BOGOTA D.C.',
+          municipio: userData.municipio || 'BOGOTA D.C.',
+          celularUsuario: userData.celular,
+          emailUsuario: userData.correo || userData.email,
+        };
 
-        // Log warnings if any
-        if (registroResult.warnings && registroResult.warnings.length > 0) {
-          await logTaskProgress(task.id, 'WARN', 'Registration completed with warnings', {
-            warnings: registroResult.warnings,
-          });
+        try {
+          const soiResult: SOIAccountCreationResult = await crearCuentaSOI(soiUserData);
+
+          if (soiResult.success && soiResult.accountCreated) {
+            // SOI exitoso - cuenta creada
+            finalOperator = 'SOI';
+            registroExitoso = true;
+            registroResult = {
+              success: true,
+              enlaceUserId: userData.numeroDocumento,
+              alreadyExists: false,
+              generatedPassword: soiResult.generatedPassword,
+            };
+            jobLogger.info('REGISTRO: SOI account created successfully');
+          } else if (soiResult.success && !soiResult.accountCreated) {
+            // Usuario ya existe en SOI - hacer fallback a Mi Planilla
+            soiError = soiResult.message || 'Usuario ya existe en SOI';
+            jobLogger.warn(`REGISTRO: SOI user already exists - ${soiError}`);
+            await logTaskProgress(task.id, 'WARN', `SOI: Usuario ya existe, haciendo fallback a Mi Planilla`, {
+              message: soiResult.message,
+            });
+          } else {
+            // SOI falló por otro motivo
+            soiError = soiResult.error || soiResult.message || 'Unknown SOI error';
+            jobLogger.warn(`REGISTRO: SOI failed - ${soiError}`);
+            await logTaskProgress(task.id, 'WARN', `SOI registration failed: ${soiError}`, {});
+          }
+        } catch (error) {
+          soiError = error instanceof Error ? error.message : String(error);
+          jobLogger.error(`REGISTRO: SOI exception - ${soiError}`);
+          await logTaskProgress(task.id, 'ERROR', `SOI registration exception: ${soiError}`, {});
         }
 
-        result = {
-          success: true,
-          data: {
-            enlaceUserId: registroResult.enlaceUserId,
-            alreadyExists: registroResult.alreadyExists,
-            warnings: registroResult.warnings,
-            enlaceUserRecordId: enlaceUser.id,
-            operator: pilaOperator,
-          },
-          duration: Date.now() - startTime,
-        };
+        // ═══════════════════════════════════════════════════════════════
+        // PASO 2: Si SOI falló, intentar Mi Planilla como fallback
+        // ═══════════════════════════════════════════════════════════════
+        if (!registroExitoso) {
+          jobLogger.info('REGISTRO: Attempting Mi Planilla fallback');
+          await logTaskProgress(task.id, 'INFO', 'Intentando registro en Mi Planilla (fallback)', {
+            soiError: soiError,
+          });
+
+          // Preparar datos para Mi Planilla
+          const nombreParts = (userData.nombre || '').split(' ');
+          const miPlanillaData: MiPlanillaRegistro = {
+            tipoDocumento: (userData.tipoDocumento as 'CC' | 'CE') || 'CC',
+            documento: userData.numeroDocumento,
+            primerNombre: nombreParts[0] || '',
+            segundoNombre: nombreParts.length > 2 ? nombreParts[1] : undefined,
+            primerApellido: nombreParts.length > 2 ? nombreParts[2] : (nombreParts[1] || ''),
+            segundoApellido: nombreParts.length > 3 ? nombreParts.slice(3).join(' ') : undefined,
+            email: userData.correo || userData.email || 'ulecolombia@gmail.com',
+            celular: userData.celular || userData.telefono || '3001234567',
+            direccion: userData.direccion || 'Calle 1 # 1-1',
+            ciudad: userData.municipio || userData.ciudad || 'Bogotá',
+            ingresosMensuales: 1300000, // Mínimo 1 SMLV
+            epsCodigo: userData.eps || 'EPS010', // Sura default
+            afpCodigo: userData.pension || '25-14', // Colpensiones default
+            actividadEconomica: '0010', // Default actividad económica
+          };
+
+          try {
+            const miPlanillaResult: MiPlanillaRegistroResult = await registrarUsuarioMiPlanilla(miPlanillaData);
+
+            if (miPlanillaResult.success) {
+              // Mi Planilla exitoso
+              finalOperator = 'MI_PLANILLA';
+              registroExitoso = true;
+              registroResult = {
+                success: true,
+                enlaceUserId: miPlanillaResult.usuario,
+                alreadyExists: false,
+                generatedPassword: miPlanillaResult.generatedPassword,
+              };
+              jobLogger.info('REGISTRO: Mi Planilla registration successful');
+              await logTaskProgress(task.id, 'INFO', 'Usuario registrado exitosamente en Mi Planilla', {
+                usuario: miPlanillaResult.usuario,
+              });
+            } else {
+              // Mi Planilla también falló
+              miPlanillaError = miPlanillaResult.error || miPlanillaResult.message || 'Unknown Mi Planilla error';
+              jobLogger.error(`REGISTRO: Mi Planilla failed - ${miPlanillaError}`);
+              await logTaskProgress(task.id, 'ERROR', `Mi Planilla registration failed: ${miPlanillaError}`, {});
+            }
+          } catch (error) {
+            miPlanillaError = error instanceof Error ? error.message : String(error);
+            jobLogger.error(`REGISTRO: Mi Planilla exception - ${miPlanillaError}`);
+            await logTaskProgress(task.id, 'ERROR', `Mi Planilla registration exception: ${miPlanillaError}`, {});
+          }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // PASO 3: Evaluar resultado final
+        // ═══════════════════════════════════════════════════════════════
+        if (registroExitoso && finalOperator) {
+          // Éxito - guardar usuario con el operador correcto
+          const enlaceUser = await prisma.enlaceUser.upsert({
+            where: { uleUserId },
+            create: {
+              uleUserId,
+              tipoDocumento: userData.tipoDocumento,
+              numeroDocumento: userData.numeroDocumento,
+              nombre: userData.nombre,
+              email: userData.correo || userData.email,
+              celular: userData.celular,
+              telefono: userData.telefono,
+              departamento: userData.departamento,
+              municipio: userData.municipio,
+              eps: userData.eps,
+              pension: userData.pension,
+              arl: userData.arl,
+              operador: finalOperator,
+              enlaceUserId: registroResult.enlaceUserId,
+              enlaceStatus: 'REGISTERED',
+              // Guardar credenciales según operador
+              ...(finalOperator === 'MI_PLANILLA' && registroResult.generatedPassword ? (() => {
+                const encrypted = encryptPassword(registroResult.generatedPassword!);
+                return {
+                  miplanillaUser: `${userData.tipoDocumento || 'CC'}${userData.numeroDocumento}`,
+                  miplanillaPassword: encrypted.encrypted,
+                  miplanillaPasswordIV: encrypted.iv,
+                  miplanillaLinkedAt: new Date(),
+                };
+              })() : {}),
+              ...(finalOperator === 'SOI' ? (() => {
+                // Si hay password generada por SOI, guardarla encriptada
+                // (esto solo ocurre si activarCuentaSOI ya corrió)
+                if (registroResult.generatedPassword) {
+                  const encrypted = encryptPassword(registroResult.generatedPassword);
+                  return {
+                    soiAccountStatus: 'ACTIVE',
+                    soiPassword: encrypted.encrypted,
+                    soiPasswordIV: encrypted.iv,
+                    soiLinkedAt: new Date(),
+                  };
+                }
+                // Sin password = cuenta creada pero pendiente de activación por email
+                return {
+                  soiAccountStatus: 'PENDING_CREATION',
+                  soiLinkedAt: new Date(),
+                };
+              })() : {}),
+              registeredAt: new Date(),
+              lastSyncAt: new Date(),
+            },
+            update: {
+              operador: finalOperator,
+              enlaceUserId: registroResult.enlaceUserId,
+              enlaceStatus: 'REGISTERED',
+              nombre: userData.nombre,
+              eps: userData.eps,
+              pension: userData.pension,
+              arl: userData.arl,
+              ...(finalOperator === 'MI_PLANILLA' && registroResult.generatedPassword ? (() => {
+                const encrypted = encryptPassword(registroResult.generatedPassword!);
+                return {
+                  miplanillaUser: `${userData.tipoDocumento || 'CC'}${userData.numeroDocumento}`,
+                  miplanillaPassword: encrypted.encrypted,
+                  miplanillaPasswordIV: encrypted.iv,
+                  miplanillaLinkedAt: new Date(),
+                };
+              })() : {}),
+              ...(finalOperator === 'SOI' ? (() => {
+                if (registroResult.generatedPassword) {
+                  const encrypted = encryptPassword(registroResult.generatedPassword);
+                  return {
+                    soiAccountStatus: 'ACTIVE',
+                    soiPassword: encrypted.encrypted,
+                    soiPasswordIV: encrypted.iv,
+                    soiLinkedAt: new Date(),
+                  };
+                }
+                // Sin password = cuenta creada pero pendiente de activación por email
+                return {
+                  soiAccountStatus: 'PENDING_CREATION',
+                  soiLinkedAt: new Date(),
+                };
+              })() : {}),
+              lastSyncAt: new Date(),
+            },
+          });
+
+          await logTaskProgress(
+            task.id,
+            'INFO',
+            `Usuario registrado exitosamente en ${finalOperator}`,
+            {
+              enlaceUserId: registroResult.enlaceUserId,
+              operator: finalOperator,
+              alreadyExists: registroResult.alreadyExists,
+              usedFallback: finalOperator === 'MI_PLANILLA' && soiError !== null,
+            }
+          );
+
+          // ═══════════════════════════════════════════════════════════════
+          // PASO 4: Si es SOI y no hay password, encolar tarea ACTIVACION
+          // La cuenta está creada pero pendiente de activación por email
+          // ═══════════════════════════════════════════════════════════════
+          if (finalOperator === 'SOI' && !registroResult.generatedPassword) {
+            jobLogger.info('REGISTRO: Enqueueing ACTIVACION task with 90s delay');
+            await logTaskProgress(task.id, 'INFO', 'Encolando tarea ACTIVACION con delay de 90s', {
+              documento: userData.numeroDocumento,
+            });
+
+            try {
+              await addActivacionTask(
+                {
+                  type: 'ACTIVACION',
+                  uleUserId: uleUserId,
+                  // Solo pasamos los campos necesarios para ACTIVACION
+                  userData: {
+                    uleUserId: uleUserId,
+                    tipoDocumento: userData.tipoDocumento,
+                    numeroDocumento: userData.numeroDocumento,
+                    nombre: userData.nombre,
+                    email: userData.correo || userData.email || '',
+                    // Campos requeridos por el tipo pero no usados en ACTIVACION
+                    telefono: userData.telefono || '',
+                    direccion: userData.direccion || '',
+                    ciudad: userData.ciudad || '',
+                    eps: userData.eps || '',
+                    pension: userData.pension || '',
+                    arl: userData.arl || '',
+                  },
+                },
+                { delay: 90000 } // 90 segundos para dar tiempo al email de SOI
+              );
+              jobLogger.info('REGISTRO: ACTIVACION task enqueued successfully');
+            } catch (activacionError) {
+              // No fallar el REGISTRO si no se puede encolar ACTIVACION
+              jobLogger.error('REGISTRO: Failed to enqueue ACTIVACION task', {
+                error: activacionError instanceof Error ? activacionError.message : String(activacionError),
+              });
+            }
+          }
+
+          result = {
+            success: true,
+            data: {
+              enlaceUserId: registroResult.enlaceUserId,
+              alreadyExists: registroResult.alreadyExists,
+              warnings: registroResult.warnings,
+              enlaceUserRecordId: enlaceUser.id,
+              operator: finalOperator,
+              usedFallback: finalOperator === 'MI_PLANILLA',
+              soiError: finalOperator === 'MI_PLANILLA' ? soiError : undefined,
+              activacionEnqueued: finalOperator === 'SOI' && !registroResult.generatedPassword,
+            },
+            duration: Date.now() - startTime,
+          };
+        } else {
+          // ═══════════════════════════════════════════════════════════════
+          // AMBOS FALLARON - Marcar REQUIRES_MANUAL_REVIEW
+          // ═══════════════════════════════════════════════════════════════
+          jobLogger.error('REGISTRO: Both SOI and Mi Planilla failed - marking for manual review');
+
+          // Guardar usuario con estado REQUIRES_MANUAL_REVIEW y los errores
+          const enlaceUser = await prisma.enlaceUser.upsert({
+            where: { uleUserId },
+            create: {
+              uleUserId,
+              tipoDocumento: userData.tipoDocumento,
+              numeroDocumento: userData.numeroDocumento,
+              nombre: userData.nombre,
+              email: userData.correo || userData.email,
+              celular: userData.celular,
+              telefono: userData.telefono,
+              departamento: userData.departamento,
+              municipio: userData.municipio,
+              eps: userData.eps,
+              pension: userData.pension,
+              arl: userData.arl,
+              enlaceStatus: 'REQUIRES_MANUAL_REVIEW',
+              registeredAt: new Date(),
+              lastSyncAt: new Date(),
+            },
+            update: {
+              enlaceStatus: 'REQUIRES_MANUAL_REVIEW',
+              nombre: userData.nombre,
+              email: userData.correo || userData.email,
+              celular: userData.celular,
+              eps: userData.eps,
+              pension: userData.pension,
+              arl: userData.arl,
+              lastSyncAt: new Date(),
+            },
+          });
+
+          // Log detallado con ambos errores
+          await logTaskProgress(task.id, 'ERROR', 'REQUIRES_MANUAL_REVIEW: Ambos operadores fallaron', {
+            soiError: soiError,
+            miPlanillaError: miPlanillaError,
+            userData: {
+              nombre: userData.nombre,
+              tipoDocumento: userData.tipoDocumento,
+              numeroDocumento: userData.numeroDocumento,
+              email: userData.correo || userData.email,
+            },
+            timestamp: new Date().toISOString(),
+          });
+
+          // Emitir evento WebSocket para notificar al dashboard admin
+          emitLog(task.id, {
+            level: 'ERROR',
+            message: `REQUIERE ATENCIÓN MANUAL: Usuario ${userData.nombre} (${userData.tipoDocumento} ${userData.numeroDocumento})`,
+            details: {
+              type: 'REQUIRES_MANUAL_REVIEW',
+              uleUserId,
+              userData: {
+                nombre: userData.nombre,
+                tipoDocumento: userData.tipoDocumento,
+                numeroDocumento: userData.numeroDocumento,
+                email: userData.correo || userData.email,
+                celular: userData.celular,
+              },
+              errors: {
+                soi: soiError,
+                miPlanilla: miPlanillaError,
+              },
+              enlaceUserRecordId: enlaceUser.id,
+              timestamp: new Date().toISOString(),
+              userMessage: 'Estamos verificando tu información, en menos de 24 horas te contactamos para completar tu registro.',
+            },
+          });
+
+          // Lanzar error para marcar la tarea como fallida pero con info útil
+          const errorMessage = `REQUIRES_MANUAL_REVIEW: SOI error: "${soiError}" | Mi Planilla error: "${miPlanillaError}"`;
+          throw new Error(errorMessage);
+        }
         break;
       }
 
@@ -517,238 +784,17 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
         throw new Error('FULL_FLOW task type is deprecated. Use SOI_LIQUIDACION_COMPLETA instead.');
       }
 
+      // TODO: reescribir - PAGO_SOI case usa pagarPlanillaSOI que fue borrado
       case 'PAGO_SOI': {
-        // Pago de planilla SOI vía PSE
-        const { numeroPlanilla, valorTotal, planillaId, banco } = job.data;
-
-        if (!numeroPlanilla || !valorTotal) {
-          throw new Error('numeroPlanilla and valorTotal required for PAGO_SOI task');
-        }
-
-        // Log inicio
-        await logTaskProgress(task.id, 'INFO', 'Starting SOI payment via PSE', {
-          numeroPlanilla,
-          valorTotal,
-          banco: banco || 'DEFAULT',
-        });
-
-        // Preparar datos de pago
-        const pagoData: SOIPagoData = {
-          numeroPlanilla,
-          valorTotal,
-          pse: banco ? { banco } : undefined,
-        };
-
-        // Ejecutar pago
-        const pagoResult = await pagarPlanillaSOI(pagoData);
-
-        if (!pagoResult.success) {
-          await logTaskProgress(task.id, 'ERROR', 'SOI payment failed', {
-            error: pagoResult.error,
-            estadoPago: pagoResult.estadoPago,
-          });
-          throw new Error(pagoResult.message || 'Payment failed');
-        }
-
-        // Log estado actual
-        await logTaskProgress(task.id, 'INFO', 'SOI payment initiated', {
-          estadoPago: pagoResult.estadoPago,
-          transaccionId: pagoResult.transaccionId,
-          awaitingBankRedirect: pagoResult.awaitingBankRedirect,
-        });
-
-        // Si el pago está en proceso (esperando banco)
-        if (pagoResult.awaitingBankRedirect) {
-          // Actualizar planilla si existe
-          if (planillaId) {
-            await prisma.pilaPlanilla.update({
-              where: { id: planillaId },
-              data: {
-                estadoPago: 'EN_PROCESO',
-              },
-            });
-
-            emitPlanillaUpdate(planillaId, {
-              numeroPlanilla,
-              estadoPago: 'EN_PROCESO',
-              userId: job.data.uleUserId,
-            });
-          }
-
-          // Emitir notificación de PSE en proceso
-          emitTaskUpdate(task.id, {
-            status: 'PROCESSING',
-            message: 'Redirecting to bank for payment',
-          } as any);
-        }
-
-        result = {
-          success: true,
-          data: {
-            numeroPlanilla,
-            estadoPago: pagoResult.estadoPago,
-            transaccionId: pagoResult.transaccionId,
-            urlBanco: pagoResult.urlBanco,
-            awaitingBankRedirect: pagoResult.awaitingBankRedirect,
-          },
-          duration: Date.now() - startTime,
-        };
-
-        break;
+        throw new Error('PAGO_SOI task type temporalmente deshabilitado - pendiente reescribir');
       }
 
       // ============================================================================
       // SOI_LIQUIDACION_COMPLETA - Nuevo flujo con datos IBC completos
       // ============================================================================
+      // TODO: reescribir - SOI_LIQUIDACION_COMPLETA case usa SOICrearPlanillaBot que fue borrado
       case 'SOI_LIQUIDACION_COMPLETA': {
-        const { planillaData, uleUserId } = job.data as {
-          planillaData: SOIPlanillaLiquidacion;
-          uleUserId: string;
-        };
-
-        if (!planillaData) {
-          throw new Error('planillaData required for SOI_LIQUIDACION_COMPLETA');
-        }
-
-        await logTaskProgress(task.id, 'INFO', 'Starting SOI planilla liquidation (complete flow)', {
-          userId: uleUserId,
-          periodo: `${planillaData.periodo.mes}/${planillaData.periodo.anio}`,
-          cotizantes: planillaData.cotizantes.length,
-        });
-
-        // 1. Obtener credenciales y hacer login
-        const soiAuthBot = new SOIAuthBot();
-
-        // Desencriptar password si viene encriptada
-        let soiPassword: string;
-        if ((planillaData as any).soiPasswordEncrypted && (planillaData as any).soiPasswordIV) {
-          soiPassword = decryptPassword(
-            (planillaData as any).soiPasswordEncrypted,
-            (planillaData as any).soiPasswordIV
-          );
-        } else if ((planillaData as any).soiPassword) {
-          soiPassword = (planillaData as any).soiPassword;
-        } else {
-          throw new Error('No se encontró password de SOI');
-        }
-
-        const cotizantePrincipal = planillaData.cotizantes[0];
-        const credentials = {
-          tipoDocumento: cotizantePrincipal.identificacion.tipoDocumento as any,
-          documento: cotizantePrincipal.identificacion.numeroDocumento,
-          password: soiPassword,
-        };
-
-        await logTaskProgress(task.id, 'INFO', 'Logging in to SOI', {
-          documento: credentials.documento,
-        });
-
-        await soiAuthBot.loginAsUser(credentials);
-        const page = soiAuthBot.getPage();
-
-        if (!page) {
-          throw new Error('No se pudo obtener página después del login');
-        }
-
-        await logTaskProgress(task.id, 'INFO', 'SOI login successful, creating planilla');
-
-        // Notificar progreso a ULE
-        await notificarLiquidacionEnProgreso(uleUserId, {
-          taskId: task.id,
-          step: 'creando_planilla',
-          progress: 30,
-        });
-
-        // 2. Crear planilla usando el nuevo bot
-        const crearPlanillaBot = new SOICrearPlanillaBot(page, {
-          takeScreenshots: true,
-          screenshotPrefix: `soi-${uleUserId}-${Date.now()}`,
-        });
-
-        const liquidacionResult = await crearPlanillaBot.crearPlanilla(planillaData);
-
-        if (!liquidacionResult.success) {
-          // Notificar fallo a ULE
-          await notificarLiquidacionFallida(uleUserId, {
-            error: liquidacionResult.error || 'Liquidación falló',
-            taskId: task.id,
-            step: 'crear_planilla',
-            periodo: `${planillaData.periodo.mes}/${planillaData.periodo.anio}`,
-          });
-          await soiAuthBot.close();
-          throw new Error(liquidacionResult.error || 'Liquidación falló');
-        }
-
-        await logTaskProgress(task.id, 'INFO', 'Planilla created successfully', {
-          numeroPlanilla: liquidacionResult.numeroPlanilla,
-          valorTotal: liquidacionResult.valorTotal,
-        });
-
-        // 3. Guardar en DB
-        const planilla = await prisma.pilaPlanilla.create({
-          data: {
-            uleUserId,
-            enlaceUserId: job.data.enlaceUserId || '',
-            taskId: task.id,
-            paymentId: job.data.paymentId || '',
-            numeroPlanilla: liquidacionResult.numeroPlanilla || '',
-            periodo: `${planillaData.periodo.mes}/${planillaData.periodo.anio}`,
-            ingresoBase: cotizantePrincipal.seguridadSocial.salarioBasico,
-            ibc: cotizantePrincipal.seguridadSocial.pension.ibc,
-            salud: liquidacionResult.desglose?.salud || 0,
-            pension: liquidacionResult.desglose?.pension || 0,
-            arl: liquidacionResult.desglose?.arl || 0,
-            total: liquidacionResult.valorTotal || 0,
-            estadoPago: 'PENDIENTE',
-            fechaLiquidacion: new Date(),
-            fechaLimite: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-          },
-        });
-
-        // 4. Emit WebSocket
-        emitPlanillaUpdate(planilla.id, {
-          numeroPlanilla: liquidacionResult.numeroPlanilla!,
-          estadoPago: 'PENDIENTE',
-          userId: uleUserId,
-        } as any);
-
-        // 5. Notificar a ULE via Webhook
-        await notificarLiquidacionCreada(uleUserId, {
-          numeroPlanilla: liquidacionResult.numeroPlanilla || '',
-          periodo: `${planillaData.periodo.mes}/${planillaData.periodo.anio}`,
-          valorTotal: liquidacionResult.valorTotal || 0,
-          valorSalud: liquidacionResult.desglose?.salud || 0,
-          valorPension: liquidacionResult.desglose?.pension || 0,
-          valorArl: liquidacionResult.desglose?.arl || 0,
-          planillaId: planilla.id,
-        });
-
-        emitTaskUpdate(task.id, {
-          status: 'COMPLETED',
-          type: 'SOI_LIQUIDACION_COMPLETA',
-          message: 'Planilla liquidada exitosamente',
-        } as any);
-
-        // 6. Cerrar sesión
-        await soiAuthBot.close();
-
-        jobLogger.info('SOI_LIQUIDACION_COMPLETA completed', {
-          planillaId: planilla.id,
-          numeroPlanilla: liquidacionResult.numeroPlanilla,
-        });
-
-        result = {
-          success: true,
-          data: {
-            planillaId: planilla.id,
-            numeroPlanilla: liquidacionResult.numeroPlanilla,
-            valorTotal: liquidacionResult.valorTotal,
-            desglose: liquidacionResult.desglose,
-          },
-          duration: Date.now() - startTime,
-        };
-
-        break;
+        throw new Error('SOI_LIQUIDACION_COMPLETA task type temporalmente deshabilitado - pendiente reescribir');
       }
 
       case 'ACTIVACION': {
@@ -781,6 +827,39 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           throw new Error(activationResult.error || activationResult.message);
         }
 
+        // ═══════════════════════════════════════════════════════════════
+        // Actualizar EnlaceUser con soiAccountStatus: 'ACTIVE' y password
+        // ═══════════════════════════════════════════════════════════════
+        if (activationResult.activation?.generatedPassword) {
+          const encrypted = encryptPassword(activationResult.activation.generatedPassword);
+
+          await prisma.enlaceUser.updateMany({
+            where: { numeroDocumento: userData.numeroDocumento },
+            data: {
+              soiAccountStatus: 'ACTIVE',
+              soiPassword: encrypted.encrypted,
+              soiPasswordIV: encrypted.iv,
+              soiLinkedAt: new Date(),
+              lastSyncAt: new Date(),
+            },
+          });
+
+          await logTaskProgress(task.id, 'INFO', 'EnlaceUser updated with SOI credentials', {
+            documento: userData.numeroDocumento,
+            soiAccountStatus: 'ACTIVE',
+          });
+        } else {
+          // Activación exitosa pero sin password (raro, pero posible)
+          await prisma.enlaceUser.updateMany({
+            where: { numeroDocumento: userData.numeroDocumento },
+            data: {
+              soiAccountStatus: 'ACTIVE',
+              soiLinkedAt: new Date(),
+              lastSyncAt: new Date(),
+            },
+          });
+        }
+
         await logTaskProgress(task.id, 'INFO', 'Account activated successfully', {
           documento: userData.numeroDocumento,
           message: activationResult.message,
@@ -792,6 +871,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
             documento: userData.numeroDocumento,
             activated: true,
             message: activationResult.message,
+            passwordSaved: !!activationResult.activation?.generatedPassword,
           },
           duration: Date.now() - startTime,
         };

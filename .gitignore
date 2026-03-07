@@ -11,7 +11,7 @@ build/
 *.d.ts.map
 
 # Environment variables
-# .env  # Permitido en repo privado para sincronizar entre máquinas
+.env
 .env.local
 .env.*.local
 
@@ -58,3 +58,6 @@ docker-compose.override.yml
 
 # Prisma
 prisma/migrations/migration_lock.toml
+
+# Config files with credentials
+config/

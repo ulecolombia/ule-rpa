@@ -800,6 +800,13 @@ export class SOIAuthBot {
   }
 
   /**
+   * Obtiene el browser actual (necesario para manejar popups)
+   */
+  getBrowser(): import('puppeteer').Browser | null {
+    return this.browserManager.getBrowser();
+  }
+
+  /**
    * Obtiene la sesión actual
    */
   getSession(): SOISession {

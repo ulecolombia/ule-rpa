@@ -24,6 +24,11 @@ import {
   MiPlanillaPlanillaRequest,
   MiPlanillaPlanillaResult,
 } from '../../types/miplanilla.types';
+import {
+  verificarEstadoPlanillaMiPlanilla,
+  aplicarArbolDecision,
+  type VerificacionPlanillaOptions,
+} from '../utils/planilla-state';
 
 export class MiPlanillaLiquidacionBot {
   private authBot: MiPlanillaAuthBot;
@@ -34,6 +39,7 @@ export class MiPlanillaLiquidacionBot {
 
   /**
    * Crea una nueva planilla en Mi Planilla
+   * IMPORTANTE: Primero verifica si ya existe planilla para el periodo
    */
   async crearPlanilla(request: MiPlanillaPlanillaRequest): Promise<MiPlanillaPlanillaResult> {
     logger.info('Starting planilla creation in Mi Planilla', {
@@ -56,7 +62,73 @@ export class MiPlanillaLiquidacionBot {
         downloadsPath: './downloads/miplanilla',
       });
 
-      // === PASO 1: Ir al dashboard y click "Generar nueva planilla" ===
+      // =========================================================
+      // PASO 0: Verificar estado de planilla existente (árbol de decisión)
+      // =========================================================
+      logger.info('Checking existing planilla state before creation');
+
+      const verificationOptions: VerificacionPlanillaOptions = {
+        periodo: {
+          mes: request.periodoMes || new Date().getMonth() + 1,
+          anio: request.periodoAno || new Date().getFullYear(),
+        },
+        tipoDocumento: request.tipoDocumento,
+        numeroDocumento: request.documento,
+      };
+
+      const estadoPlanilla = await verificarEstadoPlanillaMiPlanilla(
+        page,
+        verificationOptions
+      );
+
+      const decision = aplicarArbolDecision(estadoPlanilla);
+
+      logger.info('State verification complete for Mi Planilla', {
+        estado: estadoPlanilla.estado,
+        accion: decision.accion,
+      });
+
+      // Aplicar árbol de decisión
+      switch (decision.accion) {
+        case 'IR_A_PAGO':
+          logger.info('Planilla exists in Mi Planilla, redirecting to payment');
+          return {
+            success: true,
+            numeroPlanilla: estadoPlanilla.numeroPlanilla,
+            valorTotal: estadoPlanilla.valorTotal,
+            message: 'Planilla existente encontrada. Ir a pago.',
+            accionEjecutada: 'IR_A_PAGO',
+          };
+
+        case 'DESCARGAR_COMPROBANTE':
+          logger.info('Planilla already paid in Mi Planilla');
+          return {
+            success: true,
+            numeroPlanilla: estadoPlanilla.numeroPlanilla,
+            message: 'Planilla ya pagada. Descargar comprobante.',
+            accionEjecutada: 'DESCARGAR_COMPROBANTE',
+          };
+
+        case 'CORREGIR_DATOS':
+          logger.warn('Validation error in Mi Planilla', { mensaje: decision.mensaje });
+          return {
+            success: false,
+            message: decision.mensaje,
+            error: 'ERROR_VALIDACION',
+            accionEjecutada: 'CORREGIR_DATOS',
+          };
+
+        case 'CREAR_PLANILLA':
+          logger.info('Proceeding with planilla creation in Mi Planilla');
+          break;
+
+        default:
+          logger.warn('Unknown decision action for Mi Planilla', { accion: decision.accion });
+      }
+
+      // =========================================================
+      // PASO 1: Ir al dashboard y click "Generar nueva planilla"
+      // =========================================================
       await this.navegarAGenerarPlanilla(page, browserManager);
 
       // === PASO 2: Cerrar modal ARL si aparece ===

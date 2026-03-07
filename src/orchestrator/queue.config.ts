@@ -173,21 +173,27 @@ export async function addFullFlowTask(data: TaskInput): Promise<Job> {
  * Add ACTIVACION task to queue
  * Used after registering a user in SOI to activate their account via email link
  * @param data - Task input data (requires uleUserId and userData with documento)
+ * @param options - Optional job options (delay, priority)
  * @returns Job instance
  */
-export async function addActivacionTask(data: TaskInput): Promise<Job> {
+export async function addActivacionTask(
+  data: TaskInput,
+  options?: { delay?: number; priority?: number }
+): Promise<Job> {
   logger.info('Adding ACTIVACION task to queue', {
     userId: data.uleUserId,
     documento: data.userData?.numeroDocumento,
-    priority: data.priority,
+    priority: options?.priority || data.priority,
+    delay: options?.delay,
   });
 
   return taskQueue.add(
     'activacion',
     data,
     {
-      priority: data.priority || 6,
+      priority: options?.priority || data.priority || 6,
       jobId: `activacion-${data.uleUserId}-${Date.now()}`,
+      delay: options?.delay || 0, // Delay antes de procesar (para esperar email de SOI)
       // Retry with longer delays since email might take time to arrive
       attempts: 5,
       backoff: {

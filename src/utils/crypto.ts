@@ -355,43 +355,91 @@ export function decryptPassword(encrypted: string, iv: string): string {
 
 /**
  * Generate a secure random password for SOI accounts
- * Password requirements:
- * - Minimum 8 characters
+ *
+ * SOI Password requirements:
+ * - Length: 12-15 characters (we use 12-14 for margin)
  * - At least one uppercase letter
  * - At least one lowercase letter
  * - At least one number
- * - At least one special character
+ * - At least one special character (@, #, $, %, &, *)
+ * - No more than 2 consecutive identical characters
  *
- * @param length - Length of the password (default 12)
- * @returns Secure random password
+ * @returns Secure random password meeting SOI requirements
  *
  * @example
- * const password = generateSecurePassword(); // 'Kj9#mL2xQw1!'
+ * const password = generateSecurePassword(); // 'Kj9#mL2xQw1@n'
  */
-export function generateSecurePassword(length: number = 12): string {
+export function generateSecurePassword(): string {
   const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const lowercase = 'abcdefghijklmnopqrstuvwxyz';
   const numbers = '0123456789';
-  const special = '!@#$%&*';
+  const special = '@#$%&*'; // Only SOI-allowed special chars
   const allChars = uppercase + lowercase + numbers + special;
 
-  // Ensure at least one of each type
-  let password = '';
-  password += uppercase[crypto.randomInt(uppercase.length)];
-  password += lowercase[crypto.randomInt(lowercase.length)];
-  password += numbers[crypto.randomInt(numbers.length)];
-  password += special[crypto.randomInt(special.length)];
+  // Random length between 12 and 14
+  const length = 12 + crypto.randomInt(3); // 12, 13, or 14
 
-  // Fill the rest with random characters
-  for (let i = password.length; i < length; i++) {
-    password += allChars[crypto.randomInt(allChars.length)];
+  let password = '';
+  let attempts = 0;
+  const maxAttempts = 100;
+
+  while (attempts < maxAttempts) {
+    attempts++;
+    password = '';
+
+    // Ensure at least one of each type
+    password += uppercase[crypto.randomInt(uppercase.length)];
+    password += lowercase[crypto.randomInt(lowercase.length)];
+    password += numbers[crypto.randomInt(numbers.length)];
+    password += special[crypto.randomInt(special.length)];
+
+    // Fill the rest with random characters
+    for (let i = password.length; i < length; i++) {
+      password += allChars[crypto.randomInt(allChars.length)];
+    }
+
+    // Shuffle the password to avoid predictable patterns
+    password = password
+      .split('')
+      .sort(() => crypto.randomInt(3) - 1)
+      .join('');
+
+    // Validate: no more than 2 consecutive identical characters
+    if (!hasMoreThanTwoConsecutive(password)) {
+      return password;
+    }
   }
 
-  // Shuffle the password to avoid predictable patterns
-  const shuffled = password
-    .split('')
-    .sort(() => crypto.randomInt(3) - 1)
-    .join('');
+  // Fallback: if we couldn't generate a valid password, fix the last one
+  return fixConsecutiveChars(password, allChars);
+}
 
-  return shuffled;
+/**
+ * Checks if a string has more than 2 consecutive identical characters
+ */
+function hasMoreThanTwoConsecutive(str: string): boolean {
+  for (let i = 0; i < str.length - 2; i++) {
+    if (str[i] === str[i + 1] && str[i] === str[i + 2]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Fixes a password that has more than 2 consecutive identical characters
+ */
+function fixConsecutiveChars(password: string, allChars: string): string {
+  const chars = password.split('');
+  for (let i = 2; i < chars.length; i++) {
+    if (chars[i] === chars[i - 1] && chars[i] === chars[i - 2]) {
+      // Replace with a different random character
+      let newChar = chars[i];
+      while (newChar === chars[i]) {
+        newChar = allChars[crypto.randomInt(allChars.length)];
+      }
+      chars[i] = newChar;
+    }
+  }
+  return chars.join('');
 }

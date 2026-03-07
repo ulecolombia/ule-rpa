@@ -640,6 +640,10 @@ export async function crearCuentaSOI(
     await page.click(SOI_SELECTORS.REGISTRO_INDEPENDIENTE.BTN_SIGUIENTE);
     await page.waitForTimeout(1000);
 
+    // Esperar posible navegación/recarga entre Step 1 y Step 2
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+
     // === PASO 2: DATOS DE CONTACTO ===
     logger.info('Filling Step 2: Contact Data');
 

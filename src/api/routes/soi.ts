@@ -12,7 +12,8 @@ import { z } from 'zod';
 import { Queue } from 'bullmq';
 import { logger } from '../../utils/logger';
 import { authMiddleware } from '../middleware/auth';
-import { SOIAuthBot, crearCuentaSOI, liquidarPlanillaAsUser } from '../../bots/soi';
+import { SOIAuthBot, crearCuentaSOI } from '../../bots/soi';
+// TODO: reescribir - import { liquidarPlanillaAsUser } from '../../bots/soi';
 import {
   SOICredentialsSchema,
   SOIUserRegistrationSchema,
@@ -178,87 +179,13 @@ router.post('/create-account', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/soi/planilla
- * Liquida una planilla PILA usando las credenciales del usuario
- *
- * Body:
- * - tipoDocumento: CC, CE, etc.
- * - documento: Número de documento
- * - soiPassword: Contraseña SOI del usuario
- * - periodoMes: Mes del periodo (1-12)
- * - periodoAno: Año del periodo
- * - ibc: Ingreso Base de Cotización (mínimo 1 SMLV)
- * - diasCotizados: Días a cotizar (default 30)
- * - iniciarPago: Si se quiere iniciar pago PSE (opcional)
- * - banco: Banco para PSE (opcional)
- *
- * Response:
- * - success: boolean
- * - numeroPlanilla: Número de planilla generada
- * - valorTotal: Valor total a pagar
- * - valorSalud, valorPension, valorArl: Desglose
- */
-router.post('/planilla', async (req: Request, res: Response) => {
-  try {
-    // Validar input
-    const validation = SOIPlanillaRequestSchema.safeParse(req.body);
-
-    if (!validation.success) {
-      return res.status(400).json({
-        success: false,
-        error: 'Datos inválidos',
-        details: validation.error.errors,
-      });
-    }
-
-    const planillaData = validation.data;
-
-    logger.info('Creating SOI planilla', {
-      documento: planillaData.documento,
-      periodo: `${planillaData.periodoMes}/${planillaData.periodoAno}`,
-      ibc: planillaData.ibc,
-    });
-
-    // Liquidar planilla como el usuario
-    const result = await liquidarPlanillaAsUser(planillaData);
-
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        error: result.error || result.message,
-        numeroPlanilla: result.numeroPlanilla,
-      });
-    }
-
-    logger.info('SOI planilla created', {
-      documento: planillaData.documento,
-      numeroPlanilla: result.numeroPlanilla,
-      valorTotal: result.valorTotal,
-    });
-
-    return res.json({
-      success: true,
-      data: {
-        numeroPlanilla: result.numeroPlanilla,
-        valorTotal: result.valorTotal,
-        valorSalud: result.valorSalud,
-        valorPension: result.valorPension,
-        valorArl: result.valorArl,
-        estado: result.estado,
-        message: result.message,
-      },
-    });
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    logger.error('Error creating SOI planilla', { error: errorMsg });
-
-    return res.status(500).json({
-      success: false,
-      error: 'Error al liquidar planilla',
-      message: errorMsg,
-    });
-  }
+// TODO: reescribir - POST /api/soi/planilla endpoint
+// Este endpoint usaba liquidarPlanillaAsUser que fue borrado
+router.post('/planilla', async (_req: Request, res: Response) => {
+  return res.status(501).json({
+    success: false,
+    error: 'Endpoint temporalmente deshabilitado - pendiente reescribir',
+  });
 });
 
 /**

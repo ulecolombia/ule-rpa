@@ -31,7 +31,7 @@ const TOKEN_PATH = path.join(process.cwd(), 'config', 'gmail-token.json');
 const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
 
 // Remitente de emails de SOI
-const SOI_EMAIL_SENDER = 'noreply@soi.com.co';
+const SOI_EMAIL_SENDER = 'soportesoi@achcolombia.com.co';
 
 /**
  * Información extraída de un email de activación SOI
@@ -187,15 +187,15 @@ export class GmailReaderService {
     }
 
     try {
-      // Buscar emails de SOI que contengan el número de documento
-      const query = `from:${SOI_EMAIL_SENDER} subject:(Activar OR Bienvenido OR Activación) ${documento}`;
+      // Buscar emails de activación de SOI (sin documento en query)
+      const query = `from:${SOI_EMAIL_SENDER} subject:"SOI - Activación de Usuario"`;
 
       logger.info('Searching for activation email', { documento, query });
 
       const response = await this.gmail!.users.messages.list({
         userId: 'me',
         q: query,
-        maxResults: 10,
+        maxResults: 20,
       });
 
       if (!response.data.messages || response.data.messages.length === 0) {
@@ -203,15 +203,32 @@ export class GmailReaderService {
         return null;
       }
 
-      // Obtener el email más reciente
-      const messageId = response.data.messages[0].id!;
-      const message = await this.gmail!.users.messages.get({
-        userId: 'me',
-        id: messageId,
-        format: 'full',
-      });
+      // Buscar el email que contenga el documento en el cuerpo
+      logger.info('Found emails to check', { count: response.data.messages.length });
 
-      return this.parseActivationEmail(message.data);
+      for (const msg of response.data.messages) {
+        const message = await this.gmail!.users.messages.get({
+          userId: 'me',
+          id: msg.id!,
+          format: 'full',
+        });
+
+        const parsed = this.parseActivationEmail(message.data);
+        logger.info('Parsed email', {
+          messageId: msg.id,
+          extractedDocumento: parsed?.numeroDocumento || 'NOT_FOUND',
+          hasActivationLink: !!parsed?.activationLink,
+          matchesTarget: parsed?.numeroDocumento === documento
+        });
+
+        if (parsed && parsed.numeroDocumento === documento) {
+          logger.info('Found activation email for documento', { documento, messageId: msg.id });
+          return parsed;
+        }
+      }
+
+      logger.info('No activation email found matching documento', { documento });
+      return null;
     } catch (error) {
       logger.error('Failed to find activation email', { documento, error });
       return null;
@@ -239,7 +256,7 @@ export class GmailReaderService {
       afterDate.setHours(afterDate.getHours() - hoursBack);
       const afterTimestamp = Math.floor(afterDate.getTime() / 1000);
 
-      const query = `from:${SOI_EMAIL_SENDER} after:${afterTimestamp} subject:(Activar OR Bienvenido OR Activación)`;
+      const query = `from:${SOI_EMAIL_SENDER} after:${afterTimestamp} subject:"SOI - Activación de Usuario"`;
 
       logger.info('Searching for recent activation emails', { query, hoursBack });
 
@@ -341,10 +358,12 @@ export class GmailReaderService {
       const activationLink = activationLinkMatch?.[1] || '';
 
       // Extraer número de documento del email
-      // Patrón: "Número: XXXXXXXXXX" o "1018482146" (CC de 10 dígitos)
-      const documentoMatch = htmlBody.match(/[Nn]úmero:\s*(\d{5,15})/i)
-        || htmlBody.match(/[Cc]édula[^:]*:\s*(\d{5,15})/i)
-        || htmlBody.match(/[Dd]ocumento[^:]*:\s*(\d{5,15})/i);
+      // Nota: En HTML, ú puede estar codificado como &#250; o &uacute;
+      // Patrones: "Número: XXXXXXXXXX", "N&#250;mero: XXXXXXXXXX", etc.
+      const documentoMatch = htmlBody.match(/N(?:ú|u|&#250;|&uacute;)mero:\s*(\d+)/i)
+        || htmlBody.match(/N(?:ú|u|&#250;|&uacute;)mero de documento:\s*(\d+)/i)
+        || htmlBody.match(/[Cc](?:é|e|&#233;|&eacute;)dula[^:]*:\s*(\d+)/i)
+        || htmlBody.match(/[Dd]ocumento[^:]*:\s*(\d+)/i);
 
       const numeroDocumento = documentoMatch?.[1] || '';
 

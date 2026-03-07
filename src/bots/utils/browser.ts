@@ -163,6 +163,13 @@ export class BrowserManager {
     }
   }
 
+  /**
+   * Obtiene el browser actual (necesario para manejar popups/nuevas ventanas)
+   */
+  getBrowser(): Browser | null {
+    return this.browser;
+  }
+
   async takeScreenshot(page: Page, name: string): Promise<string> {
     const screenshotsDir = './screenshots';
     await fs.mkdir(screenshotsDir, { recursive: true });

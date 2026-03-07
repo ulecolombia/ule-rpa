@@ -181,7 +181,10 @@ export interface MiPlanillaPlanillaResult {
   fechaVencimiento?: string;
 
   // Estado
-  estado?: 'LIQUIDADA' | 'PENDIENTE_PAGO' | 'PAGADA' | 'ERROR';
+  estado?: 'LIQUIDADA' | 'PENDIENTE_PAGO' | 'PAGADA' | 'ERROR' | 'YA_EXISTE' | 'YA_PAGADA';
+
+  // Acción ejecutada por el árbol de decisión
+  accionEjecutada?: 'CREAR_PLANILLA' | 'IR_A_PAGO' | 'DESCARGAR_COMPROBANTE' | 'CORREGIR_DATOS';
 
   // Si se inició pago
   pagoIniciado?: boolean;

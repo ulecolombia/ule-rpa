@@ -46,8 +46,8 @@ const EXISTING_SOI_USER = {
 
 const EXISTING_MIPLANILLA_USER = {
   tipoDocumento: 'CC' as const,
-  documento: '1047484978',
-  password: 'Ulecolombia123',
+  documento: process.env.TEST_MIPLANILLA_DOCUMENTO || '',
+  password: process.env.TEST_MIPLANILLA_PASSWORD || '',
 };
 
 interface TestResult {
@@ -124,7 +124,7 @@ async function testMiPlanillaValidateCredentials(): Promise<void> {
     log(`   ✓ Autenticado: ${result.isAuthenticated}`, GREEN);
     log(`   ✓ Usuario: ${result.userName || 'OK'}`, GREEN);
 
-    await authBot.logout();
+    // No hay método logout en MiPlanillaAuthBot, simplemente cerramos
   } finally {
     await authBot.close();
   }

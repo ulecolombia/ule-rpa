@@ -769,26 +769,37 @@ export function emitPagoAdminTimeout(data: {
 
 /**
  * Emitir alerta a administradores
+ * Acepta 'type' o 'tipo' para compatibilidad
  */
 export function emitAdminAlert(alert: {
   id: string;
-  type: string;
+  type?: string;
+  tipo?: string;
   severity: string;
   title: string;
   message: string;
+  uleUserId?: string;
+  cedula?: string;
+  taskId?: string;
+  error?: string;
   details?: Record<string, unknown>;
   timestamp: Date;
 }): void {
   if (!io) return;
 
+  // Normalizar: usar 'tipo' como campo principal
+  const tipo = alert.tipo || alert.type || 'UNKNOWN';
+
   logger.info('Emitting admin alert', {
     alertId: alert.id,
-    type: alert.type,
+    tipo,
     severity: alert.severity,
+    uleUserId: alert.uleUserId,
   });
 
   io.emit('alert:new', {
     ...alert,
+    tipo, // Asegurar que 'tipo' siempre va en el payload
     timestamp: alert.timestamp.toISOString(),
   });
 }

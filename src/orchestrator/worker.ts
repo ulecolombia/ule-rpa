@@ -1144,11 +1144,14 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           // Notificar admin via WebSocket
           emitAdminAlert({
             id: `alert-${task.id}`,
-            type: 'SOI_LIQUIDACION_FALLIDA',
+            tipo: 'SOI_LIQUIDACION_FALLIDA',
             severity: 'error',
             title: 'SOI Liquidacion Fallida',
             message: `SOI fallo para cedula ${cedulaSOI}. Requiere intervencion manual.`,
-            details: { error: errorMsg, taskId: task.id, cedula: cedulaSOI, uleUserId: uleUserIdSOI },
+            uleUserId: uleUserIdSOI,
+            cedula: cedulaSOI,
+            taskId: task.id,
+            error: errorMsg,
             timestamp: new Date(),
           });
 
@@ -1363,11 +1366,14 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           // Notificar admin via WebSocket
           emitAdminAlert({
             id: `alert-${task.id}`,
-            type: 'MI_PLANILLA_LIQUIDACION_FALLIDA',
+            tipo: 'MI_PLANILLA_LIQUIDACION_FALLIDA',
             severity: 'error',
             title: 'Mi Planilla Liquidacion Fallida',
             message: `Mi Planilla fallo para cedula ${cedulaMP}. Requiere intervencion manual.`,
-            details: { error: errorMsg, taskId: task.id, cedula: cedulaMP, uleUserId: uleUserIdMP },
+            uleUserId: uleUserIdMP,
+            cedula: cedulaMP,
+            taskId: task.id,
+            error: errorMsg,
             timestamp: new Date(),
           });
 

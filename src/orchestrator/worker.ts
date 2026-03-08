@@ -9,6 +9,7 @@ import { redisConnection, moveToDeadLetter, addActivacionTask } from './queue.co
 import { logger, createChildLogger } from '../utils/logger';
 // config removed - pilaOperator no longer used after Enlace removal
 import { TaskInput, TaskResult } from '../types';
+import { sessionEvents } from '../services/session-events';
 
 // SOI imports
 import {
@@ -1059,7 +1060,24 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
             message: 'El bot llegó a Bancolombia Negocios. Ingresa la clave para completar el pago.',
           });
 
-          // PASO 4: Esperar pago y descargar comprobante
+          // PASO 4: Esperar confirmación del admin (10 min timeout)
+          await logTaskProgress(task.id, 'INFO', 'Esperando confirmación del admin en Bancolombia...');
+
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              reject(new Error('Timeout: Admin no confirmó el pago en 10 minutos'));
+            }, 10 * 60 * 1000);
+
+            sessionEvents.once(`payment-confirmed:${task.id}`, () => {
+              clearTimeout(timeout);
+              logger.info('Payment confirmed by admin, continuing with receipt download', { taskId: task.id });
+              resolve();
+            });
+          });
+
+          await logTaskProgress(task.id, 'INFO', 'Admin confirmó pago - descargando comprobante...');
+
+          // PASO 5: Descargar comprobante
           const esperarInputSOI: EsperarPagoInput = {
             cedula: cedulaSOI,
             mesPago: mesPagoSOI,

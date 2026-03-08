@@ -11,6 +11,8 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuthMiddleware, AdminRequest } from '../middleware/adminAuth';
 import { logger } from '../../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
+import { sessionEvents } from '../../services/session-events';
+import { emitTaskUpdate } from '../websocket';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -524,7 +526,20 @@ router.post('/session/:sessionId/confirmar-pago', async (req: AdminRequest, res:
       adminIp: req.admin?.ip,
     });
 
-    // TODO: Trigger RPA to verify payment and download receipt
+    // Emit event to notify the waiting bot
+    sessionEvents.emit(`payment-confirmed:${sessionId}`);
+
+    // Update planilla status
+    await prisma.pilaPlanilla.updateMany({
+      where: { taskId: sessionId },
+      data: { estadoPago: 'EN_PROCESO' },
+    });
+
+    // Emit WebSocket update for dashboard
+    emitTaskUpdate(sessionId, {
+      status: 'RUNNING',
+      message: 'Admin confirmó pago - descargando comprobante',
+    });
 
     res.json({
       message: 'Payment confirmation received, verifying...',

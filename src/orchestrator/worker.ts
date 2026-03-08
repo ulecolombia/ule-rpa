@@ -13,14 +13,18 @@ import { TaskInput, TaskResult } from '../types';
 // SOI imports
 import {
   crearCuentaSOI, // Función correcta para auto-registro de independientes
-  // TODO: reescribir - pagarPlanillaSOI,
-  // TODO: reescribir - SOIPagoData,
-  // Nuevo bot de crear planilla con IBC
   SOIAuthBot,
-  // TODO: reescribir - SOICrearPlanillaBot,
   // FASE 1: Comprobante bot
   descargarComprobanteSOI,
   verificarEstadoPlanillaSOI,
+  // Flujo completo de planilla (crear + pagar + comprobante)
+  crearPlanillaSOI,
+  pagarPlanillaPSE,
+  esperarPagoYDescargarComprobante,
+  checkPlanillaExistente,
+  type PlanillaInput,
+  type PlanillaExistenteResult,
+  type EsperarPagoInput,
 } from '../bots/soi';
 import type { SOIUserRegistration, SOIAccountCreationResult } from '../types/soi.types';
 
@@ -784,17 +788,333 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
         throw new Error('FULL_FLOW task type is deprecated. Use SOI_LIQUIDACION_COMPLETA instead.');
       }
 
-      // TODO: reescribir - PAGO_SOI case usa pagarPlanillaSOI que fue borrado
+      // PAGO_SOI - Pagar planilla existente via PSE
       case 'PAGO_SOI': {
-        throw new Error('PAGO_SOI task type temporalmente deshabilitado - pendiente reescribir');
+        // Extraer datos con tipo any para flexibilidad
+        const jobData = job.data as any;
+        const cedula = jobData.cedula || jobData.userData?.numeroDocumento;
+        const numeroPlanilla = jobData.numeroPlanilla;
+
+        if (!cedula || !numeroPlanilla) {
+          throw new Error('PAGO_SOI requiere: cedula, numeroPlanilla');
+        }
+
+        await logTaskProgress(task.id, 'INFO', 'Iniciando pago SOI', {
+          cedula,
+          numeroPlanilla,
+        });
+
+        // Obtener credenciales SOI
+        const enlaceUserPago = await prisma.enlaceUser.findFirst({
+          where: { numeroDocumento: cedula },
+        });
+
+        if (!enlaceUserPago?.soiPassword || !enlaceUserPago?.soiPasswordIV) {
+          throw new Error(`Usuario ${cedula} no tiene credenciales SOI`);
+        }
+
+        const soiPasswordPago = decryptPassword(enlaceUserPago.soiPassword, enlaceUserPago.soiPasswordIV);
+        if (!soiPasswordPago) {
+          throw new Error(`No se pudo desencriptar password SOI`);
+        }
+
+        let authBotPago: SOIAuthBot | null = null;
+
+        try {
+          authBotPago = new SOIAuthBot();
+          const loginResultPago = await authBotPago.loginAsUser({
+            tipoDocumento: 'CC',
+            documento: cedula,
+            password: soiPasswordPago,
+          });
+
+          if (!loginResultPago.isAuthenticated) {
+            throw new Error('Login SOI fallido');
+          }
+
+          const pagePago = authBotPago.getPage();
+          const browserPago = authBotPago.getBrowser();
+          if (!pagePago || !browserPago) {
+            throw new Error('No se pudo obtener page/browser');
+          }
+
+          // Pagar planilla existente
+          const pagoResultPago = await pagarPlanillaPSE(pagePago, numeroPlanilla);
+
+          if (!pagoResultPago.success) {
+            throw new Error('Error en pago PSE: ' + pagoResultPago.error);
+          }
+
+          await logTaskProgress(task.id, 'INFO', 'Pago PSE iniciado', {
+            estado: pagoResultPago.estado,
+          });
+
+          result = {
+            success: true,
+            data: {
+              numeroPlanilla,
+              estado: pagoResultPago.estado,
+              estadoPago: 'EN_PROCESO',
+            },
+            duration: Date.now() - startTime,
+          };
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          await logTaskProgress(task.id, 'ERROR', 'Error en pago SOI PSE', { error: errorMsg });
+          throw error;
+        } finally {
+          if (authBotPago) {
+            try {
+              await authBotPago.close();
+            } catch {
+              // Ignorar
+            }
+          }
+        }
+        break;
       }
 
       // ============================================================================
-      // SOI_LIQUIDACION_COMPLETA - Nuevo flujo con datos IBC completos
+      // SOI_LIQUIDACION_COMPLETA - Flujo completo: crear planilla + pagar + comprobante
       // ============================================================================
-      // TODO: reescribir - SOI_LIQUIDACION_COMPLETA case usa SOICrearPlanillaBot que fue borrado
       case 'SOI_LIQUIDACION_COMPLETA': {
-        throw new Error('SOI_LIQUIDACION_COMPLETA task type temporalmente deshabilitado - pendiente reescribir');
+        // Extraer datos con tipo any para flexibilidad
+        const jobDataSOI = job.data as any;
+        const uleUserIdSOI = jobDataSOI.uleUserId || job.data.uleUserId;
+        const cedulaSOI = jobDataSOI.cedula || jobDataSOI.userData?.numeroDocumento;
+        const ibcSOI = jobDataSOI.ibc || jobDataSOI.pilaData?.ibc;
+        const mesPagoSOI = jobDataSOI.mesPago || jobDataSOI.pilaData?.mesPago;
+        const anioPagoSOI = jobDataSOI.anioPago || jobDataSOI.pilaData?.anioPago;
+        const departamentoSOI = jobDataSOI.departamento || 'ATLANTICO';
+        const municipioSOI = jobDataSOI.municipio || 'BARRANQUILLA';
+
+        // Validar datos requeridos
+        if (!uleUserIdSOI || !cedulaSOI || !ibcSOI || !mesPagoSOI || !anioPagoSOI) {
+          throw new Error(
+            'SOI_LIQUIDACION_COMPLETA requiere: uleUserId, cedula, ibc, mesPago, anioPago'
+          );
+        }
+
+        await logTaskProgress(task.id, 'INFO', 'Iniciando flujo SOI completo', {
+          cedula: cedulaSOI,
+          mesPago: mesPagoSOI,
+          anioPago: anioPagoSOI,
+          ibc: ibcSOI,
+        });
+
+        // Obtener credenciales SOI del usuario
+        const enlaceUserSOI = await prisma.enlaceUser.findFirst({
+          where: { numeroDocumento: cedulaSOI },
+        });
+
+        if (!enlaceUserSOI) {
+          throw new Error(`Usuario con cédula ${cedulaSOI} no encontrado en DB`);
+        }
+
+        if (!enlaceUserSOI.soiPassword || !enlaceUserSOI.soiPasswordIV) {
+          throw new Error(`Usuario ${cedulaSOI} no tiene credenciales SOI configuradas`);
+        }
+
+        // Desencriptar password SOI
+        const soiPasswordSOI = decryptPassword(enlaceUserSOI.soiPassword, enlaceUserSOI.soiPasswordIV);
+        if (!soiPasswordSOI) {
+          throw new Error(`No se pudo desencriptar password SOI para ${cedulaSOI}`);
+        }
+
+        let authBotSOI: SOIAuthBot | null = null;
+
+        try {
+          // PASO 1: Login SOI
+          await logTaskProgress(task.id, 'INFO', 'Iniciando login SOI...');
+          emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Login SOI' });
+
+          authBotSOI = new SOIAuthBot();
+          const loginResultSOI = await authBotSOI.loginAsUser({
+            tipoDocumento: 'CC',
+            documento: cedulaSOI,
+            password: soiPasswordSOI,
+          });
+
+          if (!loginResultSOI.isAuthenticated) {
+            throw new Error('Login SOI fallido');
+          }
+
+          const pageSOI = authBotSOI.getPage();
+          const browserSOI = authBotSOI.getBrowser();
+          if (!pageSOI || !browserSOI) {
+            throw new Error('No se pudo obtener page/browser después de login');
+          }
+
+          await logTaskProgress(task.id, 'INFO', 'Login SOI exitoso', {
+            userName: loginResultSOI.userName,
+          });
+
+          // PASO 2: Verificar planilla existente antes de crear
+          const planillaInputSOI: PlanillaInput = {
+            cedula: cedulaSOI,
+            ibc: ibcSOI,
+            mesPago: mesPagoSOI,
+            anioPago: anioPagoSOI,
+            departamento: departamentoSOI,
+            municipio: municipioSOI,
+          };
+
+          const planillaExistente = await checkPlanillaExistente(pageSOI, planillaInputSOI);
+
+          let planillaResultSOI;
+          let usarPlanillaExistente = false;
+
+          if (planillaExistente.existe && planillaExistente.numeroPlanilla) {
+            await logTaskProgress(task.id, 'INFO', 'Planilla existente encontrada - usando planilla GUARDADA', {
+              numeroPlanilla: planillaExistente.numeroPlanilla,
+              totalPagar: planillaExistente.totalPagar,
+            });
+            planillaResultSOI = {
+              success: true,
+              numeroPlanilla: planillaExistente.numeroPlanilla,
+              totalPagar: planillaExistente.totalPagar,
+            };
+            usarPlanillaExistente = true;
+          } else {
+            // PASO 2b: Crear planilla nueva
+            await logTaskProgress(task.id, 'INFO', 'No hay planilla existente - creando nueva...');
+            emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Creando planilla' });
+
+            planillaResultSOI = await crearPlanillaSOI(pageSOI, browserSOI, planillaInputSOI);
+          }
+
+          if (!planillaResultSOI.success) {
+            throw new Error('Error creando planilla: ' + planillaResultSOI.error);
+          }
+
+          await logTaskProgress(task.id, 'INFO', 'Planilla creada exitosamente', {
+            numeroPlanilla: planillaResultSOI.numeroPlanilla,
+            totalPagar: planillaResultSOI.totalPagar,
+          });
+
+          // Calcular aportes para DB (aproximación basada en IBC)
+          const saludCalc = Math.round(ibcSOI * 0.125);
+          const pensionCalc = Math.round(ibcSOI * 0.16);
+          const arlCalc = Math.round(ibcSOI * 0.00522);
+          const totalCalc = planillaResultSOI.totalPagar || (saludCalc + pensionCalc + arlCalc);
+
+          // Guardar planilla en DB
+          const nuevaPlanillaSOI = await prisma.pilaPlanilla.create({
+            data: {
+              numeroPlanilla: planillaResultSOI.numeroPlanilla || `SOI-${Date.now()}`,
+              uleUserId: uleUserIdSOI,
+              enlaceUserId: enlaceUserSOI.id,
+              taskId: task.id,
+              paymentId: jobDataSOI.paymentId || `PAY-${Date.now()}`,
+              periodo: `${anioPagoSOI}-${mesPagoSOI}`,
+              ingresoBase: ibcSOI,
+              ibc: ibcSOI,
+              salud: saludCalc,
+              pension: pensionCalc,
+              arl: arlCalc,
+              total: totalCalc,
+              estadoPago: 'PENDIENTE',
+              fechaLimite: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 días
+            },
+          });
+
+          // PASO 3: Pagar con PSE
+          await logTaskProgress(task.id, 'INFO', 'Iniciando pago PSE...');
+          emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Pago PSE' });
+
+          const pagoResultSOI = await pagarPlanillaPSE(pageSOI, planillaResultSOI.numeroPlanilla!);
+
+          if (!pagoResultSOI.success) {
+            // Actualizar planilla con error
+            await prisma.pilaPlanilla.update({
+              where: { id: nuevaPlanillaSOI.id },
+              data: { estadoPago: 'RECHAZADA' },
+            });
+            throw new Error('Error en pago PSE: ' + pagoResultSOI.error);
+          }
+
+          await logTaskProgress(task.id, 'INFO', 'Navegación PSE completada - esperando acción del admin en Bancolombia', {
+            estado: pagoResultSOI.estado,
+          });
+
+          // Actualizar estado: esperando admin (bot está en Bancolombia)
+          await prisma.pilaPlanilla.update({
+            where: { id: nuevaPlanillaSOI.id },
+            data: { estadoPago: 'ESPERANDO_ADMIN' },
+          });
+
+          emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Esperando admin en Bancolombia' });
+
+          // PASO 4: Esperar pago y descargar comprobante
+          const esperarInputSOI: EsperarPagoInput = {
+            cedula: cedulaSOI,
+            mesPago: mesPagoSOI,
+            anioPago: anioPagoSOI,
+            uleUserId: uleUserIdSOI,
+          };
+
+          const comprobanteResultSOI = await esperarPagoYDescargarComprobante(
+            pageSOI,
+            browserSOI,
+            esperarInputSOI,
+            planillaResultSOI.numeroPlanilla!
+          );
+
+          if (comprobanteResultSOI.success) {
+            await logTaskProgress(task.id, 'INFO', 'Comprobante descargado exitosamente', {
+              filePath: comprobanteResultSOI.comprobantePath,
+            });
+
+            // Emitir evento de comprobante listo
+            emitComprobanteReady({
+              planillaId: nuevaPlanillaSOI.id,
+              numeroPlanilla: planillaResultSOI.numeroPlanilla!,
+              fileUrl: comprobanteResultSOI.comprobantePath || '',
+              userId: uleUserIdSOI,
+            });
+
+            result = {
+              success: true,
+              data: {
+                numeroPlanilla: planillaResultSOI.numeroPlanilla,
+                totalPagar: planillaResultSOI.totalPagar,
+                comprobantePath: comprobanteResultSOI.comprobantePath,
+                estadoPago: 'PAGADA',
+              },
+              duration: Date.now() - startTime,
+            };
+          } else {
+            // Planilla creada y pago iniciado, pero comprobante pendiente
+            await logTaskProgress(task.id, 'WARN', 'Comprobante pendiente de descarga', {
+              error: comprobanteResultSOI.error,
+            });
+
+            result = {
+              success: true,
+              data: {
+                numeroPlanilla: planillaResultSOI.numeroPlanilla,
+                totalPagar: planillaResultSOI.totalPagar,
+                estadoPago: 'EN_PROCESO',
+                comprobanteError: comprobanteResultSOI.error,
+              },
+              duration: Date.now() - startTime,
+            };
+          }
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          await logTaskProgress(task.id, 'ERROR', 'Error en flujo SOI', { error: errorMsg });
+          throw error;
+        } finally {
+          // Siempre cerrar browser
+          if (authBotSOI) {
+            try {
+              await authBotSOI.close();
+            } catch {
+              // Ignorar errores al cerrar
+            }
+          }
+        }
+        break;
       }
 
       case 'ACTIVACION': {

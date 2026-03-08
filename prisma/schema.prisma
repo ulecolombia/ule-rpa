@@ -233,6 +233,7 @@ model PilaPlanilla {
 enum PagoStatus {
   PENDIENTE // Liquidada, esperando pago
   EN_PROCESO // Pagando (PSE en curso)
+  ESPERANDO_ADMIN // Bot en Bancolombia, admin debe ingresar clave
   PAGADA // Pago confirmado
   RECHAZADA // Pago rechazado
   VENCIDA // Pasó fecha límite

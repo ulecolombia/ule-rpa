@@ -34,8 +34,16 @@ export {
 // Crear Planilla (nuevo - flujo limpio)
 export {
   crearPlanillaSOI,
+  pagarPlanillaPSE,
+  esperarPagoYDescargarComprobante,
+  checkPlanillaExistente,
   type PlanillaInput,
   type PlanillaResult,
+  type PlanillaExistenteResult,
+  type PagoInput,
+  type PagoResult,
+  type EsperarPagoInput,
+  type EsperarPagoResult,
 } from './planilla.bot';
 
 // TODO: reescribir - Pago

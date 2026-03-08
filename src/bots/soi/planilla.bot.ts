@@ -193,7 +193,7 @@ async function checkForErrors(page: Page): Promise<string | null> {
  * @param input - Datos de la planilla a verificar
  * @returns Información de la planilla existente o { existe: false }
  */
-async function checkPlanillaExistente(
+export async function checkPlanillaExistente(
   page: Page,
   input: PlanillaInput
 ): Promise<PlanillaExistenteResult> {

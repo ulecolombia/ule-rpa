@@ -88,6 +88,7 @@ Este es un servicio RPA (Robotic Process Automation) que automatiza la liquidaci
 14. [Módulo Compartido Bancolombia](#14-módulo-compartido-bancolombia)
 15. [Worker: Tipos de Tarea](#15-worker-tipos-de-tarea)
 16. [Sistema de Eventos](#16-sistema-de-eventos)
+    - 16.1 [AuditLog y Credenciales](#161-auditlog-y-credenciales-2026-03-07)
 17. [Estados de Planilla](#17-estados-de-planilla)
 18. [Estado de Implementación](#18-estado-de-implementación)
 19. [Reglas Críticas de Desarrollo](#19-reglas-críticas-de-desarrollo)
@@ -1122,28 +1123,42 @@ Ambos siguen el mismo patrón:
 
 **⚠️ NO hay fallback automático SOI → Mi Planilla en liquidación**
 
-Cuando SOI o Mi Planilla falla en liquidación, se emite alerta al admin:
+Cuando SOI o Mi Planilla falla en liquidación, se emite alerta al admin con `uleUserId` para lookup de credenciales:
 
 ```typescript
 // En catch de SOI_LIQUIDACION_COMPLETA:
 emitAdminAlert({
   id: `alert-${task.id}`,
-  type: 'SOI_LIQUIDACION_FALLIDA',
+  tipo: 'SOI_LIQUIDACION_FALLIDA',        // 'tipo' no 'type'
   severity: 'error',
   title: 'SOI Liquidacion Fallida',
-  message: `SOI fallo para cedula ${cedula}. Requiere intervencion manual.`,
-  details: { error, taskId, cedula },
+  message: `SOI fallo para cedula ${cedulaSOI}. Requiere intervencion manual.`,
+  uleUserId: uleUserIdSOI,                 // Para lookup de credenciales
+  cedula: cedulaSOI,
+  taskId: task.id,
+  error: errorMsg,
   timestamp: new Date(),
 });
 
 // En catch de MI_PLANILLA_LIQUIDACION_COMPLETA:
 emitAdminAlert({
-  type: 'MI_PLANILLA_LIQUIDACION_FALLIDA',
-  // ...
+  id: `alert-${task.id}`,
+  tipo: 'MI_PLANILLA_LIQUIDACION_FALLIDA',
+  severity: 'error',
+  title: 'Mi Planilla Liquidacion Fallida',
+  message: `Mi Planilla fallo para cedula ${cedulaMP}. Requiere intervencion manual.`,
+  uleUserId: uleUserIdMP,
+  cedula: cedulaMP,
+  taskId: task.id,
+  error: errorMsg,
+  timestamp: new Date(),
 });
 ```
 
-El admin ve la alerta en el dashboard y decide qué hacer manualmente.
+**Flujo ULE**:
+1. Admin recibe alerta con `uleUserId`
+2. Usa `GET /admin/usuarios/{uleUserId}/credenciales` para obtener credenciales
+3. Entra manualmente al portal (SOI/Mi Planilla) a completar la operación
 
 ---
 
@@ -1196,16 +1211,88 @@ emitPagoAdminAwaitingInput({
 ### emitAdminAlert
 
 ```typescript
+// Payload alineado con interfaz ULE (2026-03-07)
 emitAdminAlert({
   id: `alert-${taskId}`,
-  type: 'SOI_LIQUIDACION_FALLIDA' | 'MI_PLANILLA_LIQUIDACION_FALLIDA',
+  tipo: 'SOI_LIQUIDACION_FALLIDA' | 'MI_PLANILLA_LIQUIDACION_FALLIDA',  // 'tipo' no 'type'
   severity: 'error' | 'warning' | 'info',
   title: 'Título de la alerta',
   message: 'Descripción detallada',
-  details: { error, taskId, cedula },
+  uleUserId: uleUserId,   // Al nivel raíz para lookup de credenciales
+  cedula: cedula,         // Al nivel raíz
+  taskId: taskId,         // Al nivel raíz
+  error: errorMsg,        // Al nivel raíz
   timestamp: new Date(),
 });
 ```
+
+**IMPORTANTE**: Usar `tipo` (no `type`) y campos al nivel raíz (no dentro de `details`).
+
+---
+
+## 16.1. AUDITLOG Y CREDENCIALES (2026-03-07)
+
+### Tabla AuditLog (Prisma)
+
+Nueva tabla para registrar accesos a información sensible:
+
+```prisma
+model AuditLog {
+  id        String   @id @default(cuid())
+  accion    String   // 'CREDENCIALES_REVELADAS', etc.
+  adminId   String?  // IP del admin
+  uleUserId String?  // Usuario afectado
+  metadata  Json?    // Detalles adicionales
+  ip        String?  // IP de origen
+  createdAt DateTime @default(now())
+
+  @@map("audit_logs")
+}
+```
+
+### Endpoint de Credenciales con Auditoría
+
+```
+GET /api/admin/usuarios/:uleUserId/credenciales
+```
+
+**Respuesta:**
+```json
+{
+  "success": true,
+  "uleUserId": "abc123",
+  "nombre": "Juan Pérez",
+  "cedula": "1047484978",
+  "operador": "SOI",
+  "soi": {
+    "usuario": "1047484978",
+    "password": "passwordDesencriptado",
+    "tipoDocumento": "CC",
+    "portal": "https://www.nuevosoi.com.co/independientes"
+  },
+  "miPlanilla": {
+    "usuario": "CC1047484978",
+    "password": "passwordDesencriptado",
+    "portal": "https://independientes2.miplanilla.com/"
+  },
+  "auditado": true,
+  "timestamp": "2026-03-07T..."
+}
+```
+
+**Auditoría:** Cada acceso crea registro en `audit_logs` con:
+- `accion`: 'CREDENCIALES_REVELADAS'
+- `uleUserId`: Usuario cuyas credenciales se revelaron
+- `adminId`: IP del admin que accedió
+- `metadata`: userAgent, timestamp, operador
+
+### Endpoint de Historial de Auditoría
+
+```
+GET /api/admin/audit/credenciales?uleUserId=xxx&limit=50
+```
+
+Retorna historial de accesos a credenciales para compliance.
 
 ---
 

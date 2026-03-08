@@ -29,11 +29,14 @@ import {
 } from '../bots/soi';
 import type { SOIUserRegistration, SOIAccountCreationResult } from '../types/soi.types';
 
-// Mi Planilla imports - FASE 1: Comprobante support + FASE 2: Registro fallback
+// Mi Planilla imports - FASE 1: Comprobante support + FASE 2: Registro fallback + FASE 3: Flujo completo
 import {
   descargarComprobanteMiPlanilla,
   verificarEstadoPlanillaMiPlanilla,
   registrarUsuarioMiPlanilla,
+  ejecutarFlujoCompletoMiPlanilla,
+  type FlujoCompletoContext,
+  type FlujoCompletoResult,
 } from '../bots/miplanilla';
 import type { MiPlanillaRegistro, MiPlanillaRegistroResult } from '../types/miplanilla.types';
 import { encryptPassword } from '../utils/crypto';
@@ -1145,6 +1148,197 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
               // Ignorar errores al cerrar
             }
           }
+        }
+        break;
+      }
+
+      // ============================================================================
+      // MI_PLANILLA_LIQUIDACION_COMPLETA - Flujo completo para Mi Planilla
+      // ============================================================================
+      case 'MI_PLANILLA_LIQUIDACION_COMPLETA': {
+        const jobDataMP = job.data as any;
+        const uleUserIdMP = jobDataMP.uleUserId || job.data.uleUserId;
+        const cedulaMP = jobDataMP.cedula || jobDataMP.userData?.numeroDocumento;
+        const ibcMP = jobDataMP.ibc || jobDataMP.pilaData?.ibc;
+        const mesPagoMP = jobDataMP.mesPago || jobDataMP.pilaData?.mesPago;
+        const anioPagoMP = jobDataMP.anioPago || jobDataMP.pilaData?.anioPago;
+
+        // Validar datos requeridos
+        if (!uleUserIdMP || !cedulaMP) {
+          throw new Error('MI_PLANILLA_LIQUIDACION_COMPLETA requiere: uleUserId, cedula');
+        }
+
+        await logTaskProgress(task.id, 'INFO', 'Iniciando flujo Mi Planilla completo', {
+          cedula: cedulaMP,
+          mesPago: mesPagoMP,
+          anioPago: anioPagoMP,
+          ibc: ibcMP,
+        });
+
+        // Obtener usuario con credenciales Mi Planilla
+        const enlaceUserMP = await prisma.enlaceUser.findFirst({
+          where: { numeroDocumento: cedulaMP },
+        });
+
+        if (!enlaceUserMP) {
+          throw new Error(`Usuario con cedula ${cedulaMP} no encontrado en DB`);
+        }
+
+        if (!enlaceUserMP.miplanillaPassword || !enlaceUserMP.miplanillaPasswordIV) {
+          throw new Error(`Usuario ${cedulaMP} no tiene credenciales Mi Planilla configuradas`);
+        }
+
+        // Contexto para el flujo completo
+        const contextoMP: FlujoCompletoContext = {
+          sessionId: task.id,
+          enlaceUserId: enlaceUserMP.id,
+          ibc: ibcMP,
+        };
+
+        await logTaskProgress(task.id, 'INFO', 'Ejecutando flujo completo Mi Planilla...');
+        emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Flujo Mi Planilla' });
+
+        // Ejecutar flujo completo (login -> verificar/crear planilla -> PSE -> Bancolombia)
+        const flujoResultMP = await ejecutarFlujoCompletoMiPlanilla(contextoMP);
+
+        if (!flujoResultMP.success) {
+          throw new Error(`Error en flujo Mi Planilla: ${flujoResultMP.error}`);
+        }
+
+        await logTaskProgress(task.id, 'INFO', 'Mi Planilla: llegado a Bancolombia', {
+          etapa: flujoResultMP.etapa,
+          numeroPlanilla: flujoResultMP.numeroPlanilla,
+          reachedBank: flujoResultMP.reachedBank,
+        });
+
+        // Calcular aportes para DB
+        const ibcCalcMP = ibcMP || 1300000;
+        const saludCalcMP = Math.round(ibcCalcMP * 0.125);
+        const pensionCalcMP = Math.round(ibcCalcMP * 0.16);
+        const arlCalcMP = Math.round(ibcCalcMP * 0.00522);
+        const totalCalcMP = flujoResultMP.valorPlanilla || (saludCalcMP + pensionCalcMP + arlCalcMP);
+
+        // Guardar planilla en DB
+        const nuevaPlanillaMP = await prisma.pilaPlanilla.create({
+          data: {
+            numeroPlanilla: flujoResultMP.numeroPlanilla || `MP-${Date.now()}`,
+            uleUserId: uleUserIdMP,
+            enlaceUserId: enlaceUserMP.id,
+            taskId: task.id,
+            paymentId: jobDataMP.paymentId || `PAY-${Date.now()}`,
+            periodo: `${anioPagoMP || new Date().getFullYear()}-${mesPagoMP || (new Date().getMonth() + 1).toString().padStart(2, '0')}`,
+            ingresoBase: ibcCalcMP,
+            ibc: ibcCalcMP,
+            salud: saludCalcMP,
+            pension: pensionCalcMP,
+            arl: arlCalcMP,
+            total: totalCalcMP,
+            estadoPago: 'ESPERANDO_ADMIN',
+            fechaLimite: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+          },
+        });
+
+        emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Esperando admin en Bancolombia' });
+
+        // Emitir evento para el dashboard admin
+        const timeoutAtMP = new Date(Date.now() + 10 * 60 * 1000);
+        emitPagoAdminAwaitingInput({
+          sessionId: task.id,
+          planillaId: nuevaPlanillaMP.id,
+          numeroPlanilla: flujoResultMP.numeroPlanilla || '',
+          valorTotal: flujoResultMP.valorPlanilla || totalCalcMP,
+          screenshotUrl: '', // Mi Planilla no retorna screenshot path directamente
+          timeoutMinutes: 10,
+          timeoutAt: timeoutAtMP,
+          message: 'Mi Planilla: Bot llego a Bancolombia Negocios. Ingresa la clave para completar el pago.',
+        });
+
+        // Esperar confirmacion del admin
+        await logTaskProgress(task.id, 'INFO', 'Esperando confirmacion del admin en Bancolombia...');
+
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Timeout: Admin no confirmo el pago en 10 minutos'));
+          }, 10 * 60 * 1000);
+
+          sessionEvents.once(`payment-confirmed:${task.id}`, () => {
+            clearTimeout(timeout);
+            logger.info('Mi Planilla: Payment confirmed by admin', { taskId: task.id });
+            resolve();
+          });
+        });
+
+        await logTaskProgress(task.id, 'INFO', 'Admin confirmo pago - descargando comprobante...');
+        emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Descargando comprobante' });
+
+        // Actualizar estado de planilla
+        await prisma.pilaPlanilla.update({
+          where: { id: nuevaPlanillaMP.id },
+          data: { estadoPago: 'EN_PROCESO' },
+        });
+
+        // Desencriptar password Mi Planilla para descargar comprobante
+        const miplanillaPassMP = enlaceUserMP.miplanillaPasswordIV
+          ? decryptPassword(enlaceUserMP.miplanillaPassword!, enlaceUserMP.miplanillaPasswordIV)
+          : enlaceUserMP.miplanillaPassword;
+
+        // Descargar comprobante
+        const comprobanteResultMP = await descargarComprobanteMiPlanilla({
+          numeroPlanilla: flujoResultMP.numeroPlanilla || '',
+          uleUserId: uleUserIdMP,
+          periodo: `${anioPagoMP || new Date().getFullYear()}-${(mesPagoMP || (new Date().getMonth() + 1)).toString().padStart(2, '0')}`,
+          tipoDocumento: (enlaceUserMP.tipoDocumento || 'CC') as 'CC' | 'CE',
+          documento: cedulaMP,
+          password: miplanillaPassMP || '',
+        });
+
+        if (comprobanteResultMP.success) {
+          await logTaskProgress(task.id, 'INFO', 'Comprobante descargado exitosamente', {
+            filePath: comprobanteResultMP.filePath,
+          });
+
+          // Actualizar planilla como PAGADA
+          await prisma.pilaPlanilla.update({
+            where: { id: nuevaPlanillaMP.id },
+            data: { estadoPago: 'PAGADA' },
+          });
+
+          // Emitir evento de comprobante listo
+          emitComprobanteReady({
+            planillaId: nuevaPlanillaMP.id,
+            numeroPlanilla: flujoResultMP.numeroPlanilla || '',
+            fileUrl: comprobanteResultMP.filePath || '',
+            userId: uleUserIdMP,
+          });
+
+          result = {
+            success: true,
+            data: {
+              numeroPlanilla: flujoResultMP.numeroPlanilla,
+              totalPagar: flujoResultMP.valorPlanilla,
+              comprobantePath: comprobanteResultMP.filePath,
+              estadoPago: 'PAGADA',
+              operador: 'MI_PLANILLA',
+            },
+            duration: Date.now() - startTime,
+          };
+        } else {
+          // Pago confirmado pero comprobante pendiente
+          await logTaskProgress(task.id, 'WARN', 'Comprobante pendiente de descarga', {
+            error: comprobanteResultMP.error,
+          });
+
+          result = {
+            success: true,
+            data: {
+              numeroPlanilla: flujoResultMP.numeroPlanilla,
+              totalPagar: flujoResultMP.valorPlanilla,
+              estadoPago: 'EN_PROCESO',
+              comprobanteError: comprobanteResultMP.error,
+              operador: 'MI_PLANILLA',
+            },
+            duration: Date.now() - startTime,
+          };
         }
         break;
       }

@@ -17,6 +17,7 @@
 import { Page, Browser } from 'puppeteer';
 import { logger } from '../../utils/logger';
 import { SOI_SELECTORS } from './selectors';
+import { navegarBancolombiaNegocios } from '../utils/bancolombia-negocios.bot';
 import path from 'path';
 import fs from 'fs/promises';
 
@@ -1961,7 +1962,8 @@ export async function completarFormularioPSE(
   input: CompletarPSEInput = {
     tipoAportante: 'JURIDICA',
     banco: PSE_CONFIG.VALUES.bancolombia,
-  }
+  },
+  browser?: Browser
 ): Promise<CompletarPSEResult> {
   logger.info('='.repeat(60));
   logger.info('FASE 3: COMPLETANDO FORMULARIO PSE');
@@ -2199,162 +2201,39 @@ export async function completarFormularioPSE(
     logger.info(`URL del banco: ${urlBanco}`);
 
     // ========================================================================
-    // PASO 6: SELECCIONAR BANCOLOMBIA NEGOCIOS
+    // PASO 6-8: NAVEGAR BANCOLOMBIA NEGOCIOS (MODULO COMPARTIDO)
     // ========================================================================
-    // La página de Bancolombia PSE tiene 3 opciones:
-    // 1. Sucursal Virtual Personas
-    // 2. Sucursal Virtual Empresas
-    // 3. Bancolombia Negocios (esta es la que queremos)
-    logger.info('[PSE FORM PASO 6] Buscando opción Bancolombia Negocios...');
+    // Usa el modulo compartido que maneja:
+    // - Seleccionar Bancolombia Negocios (tercera opcion)
+    // - Esperar pagina de autenticacion
+    // - Ingresar usuario
+    // - Esperar campo de clave
+    logger.info('[PSE FORM] Usando modulo compartido navegarBancolombiaNegocios...');
 
-    await page.waitForTimeout(3000); // Esperar que cargue la página
+    // Obtener browser desde page si no se paso como parametro
+    const browserInstance = browser || (page.browser() as Browser);
+    const bancolombiaResult = await navegarBancolombiaNegocios(page, browserInstance);
 
-    // Buscar y hacer click en "Bancolombia Negocios" (tercera opción)
-    const clickedNegocios = await page.evaluate(() => {
-      // Buscar todos los elementos clickeables que contengan el texto
-      const elements = document.querySelectorAll('a, button, div[role="button"], div.option, .card, li');
-      for (const el of elements) {
-        const text = el.textContent?.trim() || '';
-        // Buscar "Negocios" o "Bancolombia Negocios"
-        if (text.toLowerCase().includes('negocios') ||
-            text.toLowerCase().includes('sucursal negocios')) {
-          (el as HTMLElement).click();
-          return { clicked: true, text };
-        }
-      }
-      // Fallback: buscar por índice (tercera opción)
-      const options = document.querySelectorAll('.card, .option, li.option, div[class*="option"]');
-      if (options.length >= 3) {
-        (options[2] as HTMLElement).click();
-        return { clicked: true, text: 'Tercera opción (índice 2)' };
-      }
-      return { clicked: false, text: '' };
-    });
+    urlBanco = bancolombiaResult.urlBanco || page.url();
+    lastScreenshot = bancolombiaResult.screenshotPath || '';
 
-    if (clickedNegocios.clicked) {
-      logger.info(`[PSE FORM PASO 6] Click en: ${clickedNegocios.text}`);
-    } else {
-      logger.warn('[PSE FORM PASO 6] No se encontró opción Negocios');
-      // Intentar esperar y buscar de nuevo
-      await page.waitForTimeout(2000);
+    if (!bancolombiaResult.success) {
+      return {
+        success: false,
+        estado: 'ERROR',
+        error: bancolombiaResult.error,
+        screenshotPath: lastScreenshot,
+      };
     }
 
-    await page.waitForTimeout(3000);
-    await takeScreenshot(page, 'pse_paso6_negocios');
-
-    // ========================================================================
-    // PASO 7: INGRESAR USUARIO BANCOLOMBIA
-    // ========================================================================
-    logger.info('[PSE FORM PASO 7] Esperando página de autenticación Bancolombia...');
-
-    // Esperar hasta que estemos en la página de autenticación
-    let enAutenticacion = false;
-    for (let i = 0; i < 10; i++) {
-      const url = page.url();
-      if (url.includes('autenticacion.apps.bancolombia') ||
-          url.includes('login.bancolombia') ||
-          url.includes('sucursalvirtual')) {
-        enAutenticacion = true;
-        break;
-      }
-      await page.waitForTimeout(2000);
-    }
-
-    if (!enAutenticacion) {
-      logger.warn('[PSE FORM PASO 7] No se llegó a página de autenticación');
-      await takeScreenshot(page, 'pse_paso7_no_auth');
-    }
-
-    const urlAuth = page.url();
-    logger.info(`[PSE FORM PASO 7] URL autenticación: ${urlAuth}`);
-    await takeScreenshot(page, 'pse_paso7_auth');
-
-    // Buscar campo de usuario y verificar si tiene valor
-    const inputUsuario = await page.$('input[type="text"], input[name*="user"], input[id*="user"], input[placeholder*="usuario"]');
-
-    if (inputUsuario) {
-      // Verificar si el campo ya tiene valor
-      const valorActual = await page.evaluate((el) => (el as HTMLInputElement).value, inputUsuario);
-
-      if (!valorActual || valorActual.trim() === '') {
-        // Campo vacío, ingresar usuario
-        logger.info(`[PSE FORM PASO 7] Ingresando usuario: ${PSE_CONFIG.BANCOLOMBIA.usuario}`);
-        await inputUsuario.click({ clickCount: 3 });
-        await inputUsuario.type(PSE_CONFIG.BANCOLOMBIA.usuario, { delay: 50 });
-      } else {
-        logger.info(`[PSE FORM PASO 7] Usuario ya presente: ${valorActual}`);
-      }
-
-      await page.waitForTimeout(1000);
-      await takeScreenshot(page, 'pse_paso7_usuario');
-
-      // Click en Continuar
-      const clickedContinuar = await page.evaluate(() => {
-        const buttons = document.querySelectorAll('button, input[type="submit"], a.btn');
-        for (const btn of buttons) {
-          const text = btn.textContent?.trim() || (btn as HTMLInputElement).value || '';
-          if (text.toLowerCase().includes('continuar') ||
-              text.toLowerCase().includes('siguiente') ||
-              text.toLowerCase().includes('ingresar')) {
-            (btn as HTMLElement).click();
-            return { clicked: true, text };
-          }
-        }
-        return { clicked: false, text: '' };
-      });
-
-      if (clickedContinuar.clicked) {
-        logger.info(`[PSE FORM PASO 7] Click en: ${clickedContinuar.text}`);
-      } else {
-        logger.warn('[PSE FORM PASO 7] No se encontró botón Continuar');
-      }
-
-      await page.waitForTimeout(3000);
-    } else {
-      logger.warn('[PSE FORM PASO 7] No se encontró campo de usuario');
-    }
-
-    // ========================================================================
-    // PASO 8: ESPERAR CAMPO DE CLAVE Y DETENER BOT
-    // ========================================================================
-    logger.info('[PSE FORM PASO 8] Esperando campo de clave...');
-
-    // Esperar a que aparezca el campo de contraseña
-    let campoClaveEncontrado = false;
-    for (let i = 0; i < 10; i++) {
-      const hayPassword = await page.evaluate(() => {
-        const pwdInput = document.querySelector('input[type="password"]');
-        return !!pwdInput;
-      });
-
-      if (hayPassword) {
-        campoClaveEncontrado = true;
-        logger.info('[PSE FORM PASO 8] Campo de clave detectado');
-        break;
-      }
-
-      await page.waitForTimeout(2000);
-    }
-
-    urlBanco = page.url();
-    lastScreenshot = await takeScreenshot(page, 'pse_esperando_clave');
-
-    logger.info('='.repeat(60));
-    if (campoClaveEncontrado) {
-      logger.info('FASE 3 COMPLETA: ESPERANDO CLAVE BANCOLOMBIA');
-    } else {
-      logger.info('FASE 3 COMPLETA: EN BANCO (sin detección de campo clave)');
-    }
-    logger.info('='.repeat(60));
-    logger.info(`URL: ${urlBanco}`);
-    logger.info(`Usuario: ${PSE_CONFIG.BANCOLOMBIA.usuario}`);
-    logger.info('⛔ BOT SE DETIENE AQUÍ');
-    logger.info('El admin debe ingresar la clave manualmente');
-    logger.info('='.repeat(60));
+    // Mapear estado del modulo compartido al estado de SOI
+    const estadoSOI = bancolombiaResult.estado === 'ESPERANDO_CLAVE'
+      ? 'ESPERANDO_CLAVE_BANCOLOMBIA'
+      : 'EN_BANCO';
 
     return {
       success: true,
-      estado: campoClaveEncontrado ? 'ESPERANDO_CLAVE_BANCOLOMBIA' : 'EN_BANCO',
+      estado: estadoSOI,
       urlBanco,
       screenshotPath: lastScreenshot,
     };

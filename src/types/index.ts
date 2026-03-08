@@ -63,7 +63,7 @@ export interface PilaData {
  * Task input for creating new RPA tasks
  */
 export interface TaskInput {
-  type: 'REGISTRO' | 'LIQUIDACION' | 'COMPROBANTE' | 'FULL_FLOW' | 'PAGO_PSE' | 'PAGO_SOI' | 'SOI_LIQUIDACION_COMPLETA' | 'ACTIVACION';
+  type: 'REGISTRO' | 'LIQUIDACION' | 'COMPROBANTE' | 'FULL_FLOW' | 'PAGO_PSE' | 'PAGO_SOI' | 'SOI_LIQUIDACION_COMPLETA' | 'MI_PLANILLA_LIQUIDACION_COMPLETA' | 'ACTIVACION';
   uleUserId: string;
   enlaceUserId?: string;
   userData?: UserData;

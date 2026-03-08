@@ -85,8 +85,12 @@ Este es un servicio RPA (Robotic Process Automation) que automatiza la liquidaci
 11. [Comandos Útiles](#11-comandos-útiles)
 12. [Selectores Verificados SOI (2026-03-07)](#12-selectores-verificados-soi-2026-03-07)
 13. [Comportamientos Especiales SOI](#13-comportamientos-especiales-soi)
-14. [Estado de Implementación](#14-estado-de-implementación)
-15. [Reglas Críticas de Desarrollo](#15-reglas-críticas-de-desarrollo)
+14. [Módulo Compartido Bancolombia](#14-módulo-compartido-bancolombia)
+15. [Worker: Tipos de Tarea](#15-worker-tipos-de-tarea)
+16. [Sistema de Eventos](#16-sistema-de-eventos)
+17. [Estados de Planilla](#17-estados-de-planilla)
+18. [Estado de Implementación](#18-estado-de-implementación)
+19. [Reglas Críticas de Desarrollo](#19-reglas-críticas-de-desarrollo)
 
 ---
 
@@ -1060,7 +1064,176 @@ await page.waitForFunction(
 
 ---
 
-## 14. ESTADO DE IMPLEMENTACIÓN
+## 14. MÓDULO COMPARTIDO BANCOLOMBIA
+
+### bancolombia-negocios.bot.ts
+
+Módulo compartido que maneja la navegación en Bancolombia PSE para ambos operadores (SOI y Mi Planilla).
+
+**Ubicación**: `src/bots/utils/bancolombia-negocios.bot.ts`
+
+```typescript
+import { navegarBancolombiaNegocios } from '../utils/bancolombia-negocios.bot';
+
+// Retorna cuando el bot llega al campo de password
+const result = await navegarBancolombiaNegocios(page, browser);
+// result.estado: 'ESPERANDO_CLAVE' | 'EN_BANCO' | 'ERROR'
+```
+
+**Flujo**:
+1. Detectar que estamos en `botonbancolombia.apps.bancolombia.com`
+2. Click en "Bancolombia Negocios" (tercera opción)
+3. Esperar página `autenticacion.apps.bancolombia.com`
+4. Ingresar usuario `Lbrochet01`
+5. Click Continuar
+6. Detectar campo `input[type="password"]`
+7. Retornar `ESPERANDO_CLAVE` (bot se detiene aquí)
+
+**IMPORTANTE**: El bot NUNCA ingresa la clave. El admin lo hace manualmente.
+
+---
+
+## 15. WORKER: TIPOS DE TAREA
+
+### Tareas Soportadas en worker.ts
+
+| Tipo | Descripción | Operador |
+|------|-------------|----------|
+| `REGISTRO` | Crear cuenta (SOI → fallback Mi Planilla) | Ambos |
+| `ACTIVACION` | Activar cuenta SOI por email | SOI |
+| `COMPROBANTE` | Descargar comprobante de planilla pagada | Ambos |
+| `PAGO_SOI` | Pagar planilla existente (legacy) | SOI |
+| `SOI_LIQUIDACION_COMPLETA` | Flujo atómico: crear + pagar + comprobante | SOI |
+| `MI_PLANILLA_LIQUIDACION_COMPLETA` | Flujo atómico: crear + pagar + comprobante | Mi Planilla |
+
+### SOI_LIQUIDACION_COMPLETA vs MI_PLANILLA_LIQUIDACION_COMPLETA
+
+Ambos siguen el mismo patrón:
+1. Login
+2. Verificar/crear planilla
+3. Iniciar PSE
+4. Navegar hasta Bancolombia (usa `navegarBancolombiaNegocios`)
+5. Emitir `pago-admin:awaiting-input` via WebSocket
+6. Esperar evento `payment-confirmed:{taskId}` del admin
+7. Descargar comprobante
+8. Emitir `comprobante:ready`
+
+### Manejo de Errores en Liquidación
+
+**⚠️ NO hay fallback automático SOI → Mi Planilla en liquidación**
+
+Cuando SOI o Mi Planilla falla en liquidación, se emite alerta al admin:
+
+```typescript
+// En catch de SOI_LIQUIDACION_COMPLETA:
+emitAdminAlert({
+  id: `alert-${task.id}`,
+  type: 'SOI_LIQUIDACION_FALLIDA',
+  severity: 'error',
+  title: 'SOI Liquidacion Fallida',
+  message: `SOI fallo para cedula ${cedula}. Requiere intervencion manual.`,
+  details: { error, taskId, cedula },
+  timestamp: new Date(),
+});
+
+// En catch de MI_PLANILLA_LIQUIDACION_COMPLETA:
+emitAdminAlert({
+  type: 'MI_PLANILLA_LIQUIDACION_FALLIDA',
+  // ...
+});
+```
+
+El admin ve la alerta en el dashboard y decide qué hacer manualmente.
+
+---
+
+## 16. SISTEMA DE EVENTOS
+
+### session-events.ts (EventEmitter)
+
+Ubicación: `src/services/session-events.ts`
+
+```typescript
+import { EventEmitter } from 'events';
+export const sessionEvents = new EventEmitter();
+
+// Worker espera confirmación del admin:
+sessionEvents.once(`payment-confirmed:${taskId}`, () => {
+  // Continuar con descarga de comprobante
+});
+
+// API emite cuando admin confirma:
+sessionEvents.emit(`payment-confirmed:${taskId}`);
+```
+
+### Eventos WebSocket
+
+| Evento | Emisor | Descripción |
+|--------|--------|-------------|
+| `pago-admin:awaiting-input` | Worker | Bot llegó a Bancolombia, esperando admin |
+| `alert:new` | Worker | Alerta de error (liquidación fallida, etc.) |
+| `comprobante:ready` | Worker | Comprobante descargado y listo |
+| `task:update` | Worker | Actualización de estado de tarea |
+| `task:completed` | Worker | Tarea completada |
+| `task:failed` | Worker | Tarea fallida |
+| `planilla:update` | Worker | Actualización de estado de planilla |
+
+### emitPagoAdminAwaitingInput
+
+```typescript
+emitPagoAdminAwaitingInput({
+  sessionId: task.id,
+  planillaId: nuevaPlanilla.id,
+  numeroPlanilla: '6010795958',
+  valorTotal: 570000,
+  screenshotUrl: '/screenshots/bancolombia_esperando_clave.png',
+  timeoutMinutes: 10,
+  timeoutAt: new Date(Date.now() + 10 * 60 * 1000),
+  message: 'Bot llego a Bancolombia Negocios. Ingresa la clave.',
+});
+```
+
+### emitAdminAlert
+
+```typescript
+emitAdminAlert({
+  id: `alert-${taskId}`,
+  type: 'SOI_LIQUIDACION_FALLIDA' | 'MI_PLANILLA_LIQUIDACION_FALLIDA',
+  severity: 'error' | 'warning' | 'info',
+  title: 'Título de la alerta',
+  message: 'Descripción detallada',
+  details: { error, taskId, cedula },
+  timestamp: new Date(),
+});
+```
+
+---
+
+## 17. ESTADOS DE PLANILLA
+
+### Enum PagoStatus (Prisma)
+
+```prisma
+enum PagoStatus {
+  PENDIENTE       // Planilla creada, sin pagar
+  ESPERANDO_ADMIN // Bot en Bancolombia, esperando input del admin
+  EN_PROCESO      // Admin confirmó, descargando comprobante
+  PAGADA          // Pago completado, comprobante disponible
+  RECHAZADA       // Error en pago PSE
+  VENCIDA         // Fecha límite pasada
+}
+```
+
+### Flujo de Estados
+
+```
+PENDIENTE → ESPERANDO_ADMIN → EN_PROCESO → PAGADA
+                                        ↘ RECHAZADA
+```
+
+---
+
+## 18. ESTADO DE IMPLEMENTACIÓN
 
 ### SOI (servicio.nuevosoi.com.co)
 
@@ -1070,8 +1243,10 @@ await page.waitForFunction(
 | Registro cuenta | ✅ FUNCIONANDO | `registro.bot.ts` | Incluye activación por email |
 | Crear planilla | ✅ FUNCIONANDO | `planilla.bot.ts` | Flujo completo con 5 sub-pasos |
 | Detectar planilla existente | ✅ FUNCIONANDO | `planilla.bot.ts` | Reutiliza si ya existe |
-| Pago PSE | ⏳ PENDIENTE | `pago.bot.ts` | Falta implementar |
-| Descarga comprobante | ⏳ PENDIENTE | - | Falta implementar |
+| Pago PSE | ✅ FUNCIONANDO | `planilla.bot.ts` | Usa módulo compartido Bancolombia |
+| Flujo completo (worker) | ✅ FUNCIONANDO | `worker.ts` | `SOI_LIQUIDACION_COMPLETA` |
+| Alerta admin en fallo | ✅ FUNCIONANDO | `worker.ts` | `emitAdminAlert` |
+| Descarga comprobante | ✅ FUNCIONANDO | `planilla.bot.ts` | Después de confirmación admin |
 
 ### Mi Planilla (miplanilla.com)
 
@@ -1079,8 +1254,18 @@ await page.waitForFunction(
 |--------------|--------|---------|-------|
 | Login | ✅ FUNCIONANDO | `auth.bot.ts` | Usuario = CC + documento |
 | Crear planilla | ⚠️ PARCIAL | `liquidacion.bot.ts` | Depende de perfil configurado |
-| Pago PSE admin-controlled | ⚠️ PARCIAL | `pago-admin-controlled.bot.ts` | Necesita testing |
-| Flujo completo | ⏳ PENDIENTE | `flujo-completo-admin.bot.ts` | En desarrollo |
+| Pago PSE admin-controlled | ✅ FUNCIONANDO | `flujo-completo-admin.bot.ts` | Usa módulo compartido Bancolombia |
+| Flujo completo (worker) | ✅ FUNCIONANDO | `worker.ts` | `MI_PLANILLA_LIQUIDACION_COMPLETA` |
+| Alerta admin en fallo | ✅ FUNCIONANDO | `worker.ts` | `emitAdminAlert` |
+| Descarga comprobante | ✅ FUNCIONANDO | `comprobante.bot.ts` | Después de confirmación admin |
+
+### Módulos Compartidos
+
+| Módulo | Archivo | Usado por |
+|--------|---------|-----------|
+| Navegación Bancolombia | `bancolombia-negocios.bot.ts` | SOI, Mi Planilla |
+| Session Events | `session-events.ts` | Worker, API |
+| Crypto (AES-256) | `crypto.ts` | Todos |
 
 ### Planilla Creada Exitosamente (2026-03-07)
 ```
@@ -1093,7 +1278,7 @@ Usuario: Camilo Andres Maturana Mejia (CC 1047478670)
 
 ---
 
-## 15. REGLAS CRÍTICAS DE DESARROLLO
+## 19. REGLAS CRÍTICAS DE DESARROLLO
 
 ### ❌ NUNCA HACER
 

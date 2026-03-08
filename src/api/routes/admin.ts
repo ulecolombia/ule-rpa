@@ -1822,6 +1822,168 @@ router.post('/emergency/planilla/:planillaId/mark-paid', async (req: AdminReques
 });
 
 // ============================================================================
+// CREDENCIALES CON AUDITORIA
+// ============================================================================
+
+/**
+ * GET /api/admin/usuarios/:uleUserId/credenciales
+ *
+ * Obtener credenciales de un usuario con trazabilidad completa.
+ * Registra la acción en AuditLog para compliance.
+ *
+ * Devuelve:
+ * - Datos básicos del usuario
+ * - Credenciales SOI (desencriptadas)
+ * - Credenciales Mi Planilla (desencriptadas)
+ */
+router.get('/usuarios/:uleUserId/credenciales', async (req: AdminRequest, res: Response) => {
+  try {
+    const { uleUserId } = req.params;
+    const adminIp = req.admin?.ip || req.ip || 'unknown';
+    const userAgent = req.headers['user-agent'] || 'unknown';
+
+    // Buscar usuario
+    const user = await prisma.enlaceUser.findUnique({
+      where: { uleUserId },
+    });
+
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'Usuario no encontrado',
+      });
+      return;
+    }
+
+    // Desencriptar credenciales SOI
+    let soiPassword: string | null = null;
+    if (user.soiPassword && user.soiPasswordIV) {
+      try {
+        soiPassword = decryptPassword(user.soiPassword, user.soiPasswordIV);
+      } catch (e) {
+        soiPassword = '[ERROR AL DESENCRIPTAR]';
+      }
+    }
+
+    // Desencriptar credenciales Mi Planilla
+    let miplanillaPassword: string | null = null;
+    if (user.miplanillaPassword && user.miplanillaPasswordIV) {
+      try {
+        miplanillaPassword = decryptPassword(user.miplanillaPassword, user.miplanillaPasswordIV);
+      } catch (e) {
+        miplanillaPassword = '[ERROR AL DESENCRIPTAR]';
+      }
+    }
+
+    // ========================================
+    // REGISTRAR EN AUDIT LOG
+    // ========================================
+    await prisma.auditLog.create({
+      data: {
+        accion: 'CREDENCIALES_REVELADAS',
+        adminId: adminIp,
+        uleUserId: user.uleUserId,
+        ip: adminIp,
+        metadata: {
+          userAgent,
+          timestamp: new Date().toISOString(),
+          tipoDocumento: user.tipoDocumento,
+          numeroDocumento: user.numeroDocumento,
+          operador: user.operador,
+          // No guardar las credenciales en el log, solo que fueron accedidas
+          soiCredencialesAccedidas: !!soiPassword,
+          miplanillaCredencialesAccedidas: !!miplanillaPassword,
+        },
+      },
+    });
+
+    logger.warn('AUDIT: Credenciales reveladas', {
+      uleUserId,
+      adminIp,
+      operador: user.operador,
+    });
+
+    // ========================================
+    // RESPUESTA
+    // ========================================
+    res.json({
+      success: true,
+      uleUserId: user.uleUserId,
+      nombre: user.nombre,
+      cedula: user.numeroDocumento,
+      operador: user.operador,
+
+      soi: user.soiPassword ? {
+        usuario: user.numeroDocumento,
+        password: soiPassword,
+        tipoDocumento: user.tipoDocumento,
+        portal: 'https://www.nuevosoi.com.co/independientes',
+      } : null,
+
+      miPlanilla: user.miplanillaPassword ? {
+        usuario: 'CC' + user.numeroDocumento,
+        password: miplanillaPassword,
+        portal: 'https://independientes2.miplanilla.com/',
+      } : null,
+
+      auditado: true,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error('Error obteniendo credenciales', { error });
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+    });
+  }
+});
+
+/**
+ * GET /api/admin/audit/credenciales
+ *
+ * Historial de accesos a credenciales (para compliance)
+ */
+router.get('/audit/credenciales', async (req: AdminRequest, res: Response) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const uleUserId = req.query.uleUserId as string;
+
+    const where: any = {
+      accion: 'CREDENCIALES_REVELADAS',
+    };
+
+    if (uleUserId) {
+      where.uleUserId = uleUserId;
+    }
+
+    const logs = await prisma.auditLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+
+    res.json({
+      success: true,
+      count: logs.length,
+      logs: logs.map((log) => ({
+        id: log.id,
+        uleUserId: log.uleUserId,
+        adminId: log.adminId,
+        ip: log.ip,
+        metadata: log.metadata,
+        createdAt: log.createdAt,
+      })),
+    });
+  } catch (error) {
+    logger.error('Error obteniendo audit logs', { error });
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+    });
+  }
+});
+
+// ============================================================================
 // HELPERS
 // ============================================================================
 

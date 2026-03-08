@@ -458,3 +458,36 @@ enum PagoAdminStatus {
   CANCELLED            // Cancelado por admin
   TIMEOUT              // Timeout por inactividad del admin
 }
+
+// ========================================
+// AUDIT LOG - TRAZABILIDAD DE ACCIONES
+// ========================================
+
+// Registro de auditoría para acciones sensibles
+model AuditLog {
+  id        String   @id @default(cuid())
+
+  // Tipo de acción
+  accion    String   // CREDENCIALES_REVELADAS, PLANILLA_MARCADA_PAGADA, etc.
+
+  // Quién realizó la acción
+  adminId   String?  // ID o IP del admin
+
+  // Sobre quién/qué se realizó la acción
+  uleUserId String?  // Usuario afectado (si aplica)
+
+  // Detalles adicionales (JSON flexible)
+  metadata  Json?    // { ip, userAgent, planillaId, etc. }
+
+  // IP de origen
+  ip        String?
+
+  // Timestamp
+  createdAt DateTime @default(now())
+
+  @@index([accion])
+  @@index([uleUserId])
+  @@index([adminId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

@@ -64,6 +64,7 @@ import {
   emitQueueUpdate,
   emitComprobanteReady,
   emitPagoAdminAwaitingInput,
+  emitAdminAlert,
 } from '../api/websocket';
 import { getQueueStats } from './queue.config';
 
@@ -1137,7 +1138,20 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           }
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
-          await logTaskProgress(task.id, 'ERROR', 'Error en flujo SOI', { error: errorMsg });
+
+          await logTaskProgress(task.id, 'ERROR', 'SOI fallo en liquidacion', { error: errorMsg });
+
+          // Notificar admin via WebSocket
+          emitAdminAlert({
+            id: `alert-${task.id}`,
+            type: 'SOI_LIQUIDACION_FALLIDA',
+            severity: 'error',
+            title: 'SOI Liquidacion Fallida',
+            message: `SOI fallo para cedula ${cedulaSOI}. Requiere intervencion manual.`,
+            details: { error: errorMsg, taskId: task.id, cedula: cedulaSOI },
+            timestamp: new Date(),
+          });
+
           throw error;
         } finally {
           // Siempre cerrar browser

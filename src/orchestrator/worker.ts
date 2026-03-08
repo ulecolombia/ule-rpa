@@ -1148,7 +1148,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
             severity: 'error',
             title: 'SOI Liquidacion Fallida',
             message: `SOI fallo para cedula ${cedulaSOI}. Requiere intervencion manual.`,
-            details: { error: errorMsg, taskId: task.id, cedula: cedulaSOI },
+            details: { error: errorMsg, taskId: task.id, cedula: cedulaSOI, uleUserId: uleUserIdSOI },
             timestamp: new Date(),
           });
 
@@ -1367,7 +1367,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
             severity: 'error',
             title: 'Mi Planilla Liquidacion Fallida',
             message: `Mi Planilla fallo para cedula ${cedulaMP}. Requiere intervencion manual.`,
-            details: { error: errorMsg, taskId: task.id, cedula: cedulaMP },
+            details: { error: errorMsg, taskId: task.id, cedula: cedulaMP, uleUserId: uleUserIdMP },
             timestamp: new Date(),
           });
 

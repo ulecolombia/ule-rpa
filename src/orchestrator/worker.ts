@@ -59,6 +59,7 @@ import {
   emitPlanillaUpdate,
   emitQueueUpdate,
   emitComprobanteReady,
+  emitPagoAdminAwaitingInput,
 } from '../api/websocket';
 import { getQueueStats } from './queue.config';
 
@@ -1044,6 +1045,19 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           });
 
           emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Esperando admin en Bancolombia' });
+
+          // Emitir evento específico para el dashboard admin
+          const timeoutAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutos
+          emitPagoAdminAwaitingInput({
+            sessionId: task.id,
+            planillaId: nuevaPlanillaSOI.id,
+            numeroPlanilla: planillaResultSOI.numeroPlanilla || '',
+            valorTotal: planillaResultSOI.totalPagar || 0,
+            screenshotUrl: pagoResultSOI.screenshotPath || '',
+            timeoutMinutes: 10,
+            timeoutAt: timeoutAt,
+            message: 'El bot llegó a Bancolombia Negocios. Ingresa la clave para completar el pago.',
+          });
 
           // PASO 4: Esperar pago y descargar comprobante
           const esperarInputSOI: EsperarPagoInput = {

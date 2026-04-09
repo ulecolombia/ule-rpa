@@ -11,6 +11,7 @@ import { BrowserManager } from '../utils/browser';
 import { logger } from '../../utils/logger';
 import { config } from '../../utils/config';
 import { BotError } from '../utils/errors';
+import { analyzeScreenshot } from '../../services/gemini-vision.service';
 import {
   MIPLANILLA_URLS,
   MIPLANILLA_SELECTORS,
@@ -119,7 +120,8 @@ export class MiPlanillaAuthBot {
       // Obtener nombre del usuario logueado
       const userName = await this.getLoggedUserName(page);
 
-      await this.browserManager.takeScreenshot(page, 'miplanilla-login-success');
+      const successShot = await this.browserManager.takeScreenshot(page, 'miplanilla-login-success');
+      analyzeScreenshot(successShot, '¿El login de Mi Planilla fue exitoso? ¿Aparece el nombre del usuario o el dashboard principal? ¿Hay algún error o captcha visible?').then(r => logger.info('[Vision] miplanilla-login-success', r)).catch(() => {});
 
       this.session = {
         isAuthenticated: true,

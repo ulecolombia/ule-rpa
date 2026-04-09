@@ -20,6 +20,7 @@ import { SOI_SELECTORS } from './selectors';
 import { navegarBancolombiaNegocios } from '../utils/bancolombia-negocios.bot';
 import path from 'path';
 import fs from 'fs/promises';
+import { analyzeScreenshot } from '../../services/gemini-vision.service';
 
 // ============================================================================
 // TIPOS EXPORTADOS
@@ -1374,7 +1375,8 @@ async function confirmarPlanilla(page: Page): Promise<{ numeroPlanilla: string; 
     }
   }
 
-  await takeScreenshot(page, 'paso4_liquidacion');
+  const liquidacionShot = await takeScreenshot(page, 'paso4_liquidacion');
+  analyzeScreenshot(liquidacionShot, '¿Los valores de liquidación SOI son números válidos y positivos? ¿Hay algún error, alerta o valor en cero visible?').then(r => logger.info('[Vision] paso4_liquidacion', r)).catch(() => {});
 
   // En Paso 4 (Liquidación General):
   // Hacer scroll hasta el final
@@ -2971,6 +2973,7 @@ export async function crearPlanillaSOI(
     const { numeroPlanilla, totalPagar } = await confirmarPlanilla(page);
 
     lastScreenshot = await takeScreenshot(page, 'planilla_exitosa');
+    analyzeScreenshot(lastScreenshot, '¿Aparece un número de planilla y total a pagar? ¿La planilla SOI fue creada exitosamente?').then(r => logger.info('[Vision] planilla_exitosa', r)).catch(() => {});
 
     logger.info('='.repeat(60));
     logger.info('PLANILLA CREADA EXITOSAMENTE');

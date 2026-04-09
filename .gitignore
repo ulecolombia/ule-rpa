@@ -61,3 +61,4 @@ prisma/migrations/migration_lock.toml
 
 # Config files with credentials
 config/
+tmp/

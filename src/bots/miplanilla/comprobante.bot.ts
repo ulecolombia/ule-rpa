@@ -23,6 +23,7 @@ import {
 import { logger } from '../../utils/logger';
 import fs from 'fs/promises';
 import path from 'path';
+import { analyzeScreenshot } from '../../services/gemini-vision.service';
 
 export interface MiPlanillaComprobanteDownloadResult {
   success: boolean;
@@ -262,7 +263,8 @@ export class MiPlanillaComprobanteBot {
         timeout: 30000,
       });
       await page.waitForTimeout(3000);
-      await this.takeScreenshot(page, `01-administrar-${numeroPlanilla}`);
+      const administrarShot = await this.takeScreenshot(page, `01-administrar-${numeroPlanilla}`);
+      analyzeScreenshot(administrarShot, '¿Aparece la tabla de planillas de Mi Planilla? ¿Hay un botón de descarga o administrar visible?').then(r => logger.info('[Vision] miplanilla-comprobante-administrar', r)).catch(() => {});
 
       // PASO 2: Buscar la planilla y verificar estado
       logger.info('Step 2: Finding planilla');
@@ -368,7 +370,8 @@ export class MiPlanillaComprobanteBot {
       }
 
       logger.info('Download button clicked', { selector: downloadClicked.selector });
-      await this.takeScreenshot(page, `02-clicked-download-${numeroPlanilla}`);
+      const downloadShot = await this.takeScreenshot(page, `02-clicked-download-${numeroPlanilla}`);
+      analyzeScreenshot(downloadShot, '¿Se inició la descarga del comprobante de Mi Planilla? ¿Hay algún error o mensaje inesperado en pantalla?').then(r => logger.info('[Vision] miplanilla-comprobante-download', r)).catch(() => {});
 
       // PASO 4: Esperar a que se descargue el archivo
       logger.info('Step 4: Waiting for file download');

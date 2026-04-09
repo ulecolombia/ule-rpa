@@ -29,6 +29,7 @@ import {
   aplicarArbolDecision,
   type VerificacionPlanillaOptions,
 } from '../utils/planilla-state';
+import { analyzeScreenshot } from '../../services/gemini-vision.service';
 
 export class MiPlanillaLiquidacionBot {
   private authBot: MiPlanillaAuthBot;
@@ -316,7 +317,8 @@ export class MiPlanillaLiquidacionBot {
     await this.clickElement(page, MIPLANILLA_SELECTORS.btnGenerarPlanillaFinal, 'Generar Planilla');
     await page.waitForTimeout(3000);
 
-    await browserManager.takeScreenshot(page, 'miplanilla-after-generate');
+    const afterGenerateShot = await browserManager.takeScreenshot(page, 'miplanilla-after-generate');
+    analyzeScreenshot(afterGenerateShot, '¿La planilla de Mi Planilla fue generada exitosamente? ¿Aparece un número de planilla o resumen de valores? ¿Hay algún error visible?').then(r => logger.info('[Vision] miplanilla-after-generate', r)).catch(() => {});
 
     // Esperar a que cargue la lista de planillas
     await page.waitForTimeout(2000);

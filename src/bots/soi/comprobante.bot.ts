@@ -20,6 +20,7 @@ import { SOI_SELECTORS } from './selectors';
 import { logger } from '../../utils/logger';
 import fs from 'fs/promises';
 import path from 'path';
+import { analyzeScreenshot } from '../../services/gemini-vision.service';
 
 export interface ComprobanteDownloadResult {
   success: boolean;
@@ -247,7 +248,8 @@ export class SOIComprobanteBot {
         timeout: 30000,
       });
       await page.waitForTimeout(2000);
-      await this.takeScreenshot(page, `01-soportes-${numeroPlanilla}`);
+      const soportesShot = await this.takeScreenshot(page, `01-soportes-${numeroPlanilla}`);
+      analyzeScreenshot(soportesShot, '¿Aparece la tabla de soportes o comprobantes de la planilla SOI? ¿Hay un botón de descarga visible?').then(r => logger.info('[Vision] soi-comprobante-soportes', r)).catch(() => {});
 
       // PASO 3: Buscar y hacer click en descargar
       logger.info('Step 3: Finding download button for planilla');
@@ -311,7 +313,8 @@ export class SOIComprobanteBot {
       }
 
       logger.info('Download button clicked', { selector: downloadClicked.selector });
-      await this.takeScreenshot(page, `02-clicked-download-${numeroPlanilla}`);
+      const downloadShot = await this.takeScreenshot(page, `02-clicked-download-${numeroPlanilla}`);
+      analyzeScreenshot(downloadShot, '¿Se inició la descarga del comprobante SOI? ¿Hay algún error o mensaje inesperado en pantalla?').then(r => logger.info('[Vision] soi-comprobante-download', r)).catch(() => {});
 
       // PASO 4: Esperar a que se descargue el archivo
       logger.info('Step 4: Waiting for file download');

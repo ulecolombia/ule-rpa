@@ -13,6 +13,7 @@ import { SOI_SELECTORS } from './selectors';
 import { logger } from '../../utils/logger';
 import { config } from '../../utils/config';
 import { BotError } from '../utils/errors';
+import { analyzeScreenshot } from '../../services/gemini-vision.service';
 import {
   SOICredentialsValidationResult,
   TipoDocumento,
@@ -148,7 +149,8 @@ export class SOIAuthBot {
       // Obtener nombre del usuario logueado
       const userName = await this.getLoggedUserName(page);
 
-      await this.browserManager.takeScreenshot(page, 'soi-login-success');
+      const successShot = await this.browserManager.takeScreenshot(page, 'soi-login-success');
+      analyzeScreenshot(successShot, '¿El login SOI fue exitoso? ¿Aparece el nombre del usuario o el dashboard principal? ¿Hay algún error o captcha visible?').then(r => logger.info('[Vision] soi-login-success', r)).catch(() => {});
 
       this.session = {
         isAuthenticated: true,

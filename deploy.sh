@@ -1,0 +1,55 @@
+#!/bin/bash
+# =============================================================================
+# ULE RPA - Deploy Script
+
+# Load PATH for SSH sessions
+export PATH="/usr/local/opt/node@18/bin:/usr/local/opt/postgresql@15/bin:/usr/local/opt/redis/bin:$PATH"
+# Uso: bash ~/ule-rpa/deploy.sh
+# =============================================================================
+
+set -e
+
+cd /Users/luisbrochet/ule-rpa
+
+echo "=== 1. Pulling latest code from GitHub ==="
+git pull origin main
+
+echo ""
+echo "=== 2. Installing dependencies ==="
+PUPPETEER_SKIP_DOWNLOAD=true npm install 2>/dev/null || PUPPETEER_SKIP_DOWNLOAD=true npm install --ignore-scripts 2>/dev/null
+
+echo ""
+echo "=== 3. Generating Prisma client ==="
+npx prisma generate 2>/dev/null || (rm -rf node_modules && PUPPETEER_SKIP_DOWNLOAD=true npm install --ignore-scripts && npx prisma generate)
+
+echo ""
+echo "=== 4. Applying database migrations ==="
+npx prisma migrate deploy
+
+echo ""
+echo "=== 5. Building TypeScript ==="
+npm run build
+
+echo ""
+echo "=== 6. Restarting RPA service ==="
+launchctl unload ~/Library/LaunchAgents/com.ule.rpa.plist 2>/dev/null
+launchctl load ~/Library/LaunchAgents/com.ule.rpa.plist
+
+echo ""
+echo "=== 7. Restarting Cloudflare Tunnel ==="
+launchctl unload ~/Library/LaunchAgents/com.ule.cloudflared.plist 2>/dev/null
+launchctl load ~/Library/LaunchAgents/com.ule.cloudflared.plist
+
+echo ""
+echo "=== 8. Waiting for services to start ==="
+sleep 10
+
+echo ""
+echo "=== 9. Health check ==="
+curl -s http://localhost:3001/health
+echo ""
+curl -s https://rpa.ulecolombia.com/health
+echo ""
+
+echo ""
+echo "=== DEPLOY COMPLETE ==="

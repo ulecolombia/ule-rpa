@@ -19,8 +19,9 @@ export async function generateKey(password: string, salt: string): Promise<Buffe
 }
 
 /**
- * Get or generate application encryption key
- * Uses key from config or generates a deterministic one
+ * Get application encryption key via SHA256.
+ * TODO: Migrate to scrypt in a dedicated PR with data migration plan.
+ * For now, keep SHA256 to avoid breaking existing encrypted passwords.
  */
 function getEncryptionKey(): Buffer {
   const key = config.encryption.key;
@@ -333,7 +334,6 @@ export function encryptPassword(password: string): { encrypted: string; iv: stri
  * @returns Decrypted plain text password
  */
 export function decryptPassword(encrypted: string, iv: string): string {
-  const key = getEncryptionKey();
   const parts = encrypted.split(':');
 
   if (parts.length !== 2) {
@@ -344,6 +344,7 @@ export function decryptPassword(encrypted: string, iv: string): string {
   const encryptedData = parts[1];
   const ivBuffer = Buffer.from(iv, 'hex');
 
+  const key = getEncryptionKey();
   const decipher = crypto.createDecipheriv(ALGORITHM, key, ivBuffer);
   decipher.setAuthTag(tag);
 

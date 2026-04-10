@@ -4,6 +4,8 @@
  */
 
 import cron from 'node-cron';
+import fs from 'fs';
+import path from 'path';
 import { logger } from '../utils/logger';
 import {
   taskQueue,
@@ -45,6 +47,9 @@ const SCHEDULES = {
 
   // Every 4 hours - Run reconciliation job for stuck users
   RECONCILIATION: '0 */4 * * *',
+
+  // Every hour - Clean old screenshots (older than 1 hour)
+  CLEAN_SCREENSHOTS: '0 * * * *',
 
   // Every 15 minutes - Run monitoring checks for alerts
   MONITORING_CHECKS: '*/15 * * * *',
@@ -362,7 +367,13 @@ async function checkPaidPlanillasTask() {
  * Run reconciliation job to fix stuck users and tasks
  * FASE 2: Handles orphaned users and stale states
  */
+let reconciliationRunning = false;
 async function reconciliationTask() {
+  if (reconciliationRunning) {
+    logger.info('Reconciliation already running, skipping');
+    return;
+  }
+  reconciliationRunning = true;
   try {
     logger.info('Running scheduled job: Reconciliation');
 
@@ -393,6 +404,41 @@ async function reconciliationTask() {
     }
   } catch (error) {
     logger.error('Failed to run reconciliation job', { error });
+  } finally {
+    reconciliationRunning = false;
+  }
+}
+
+/**
+ * Clean old screenshots (older than 1 hour) to prevent disk bloat with sensitive data
+ */
+async function cleanOldScreenshotsTask() {
+  const screenshotDirs = ['./screenshots', './logs/screenshots'];
+  const maxAgeMs = 60 * 60 * 1000; // 1 hour
+  let deletedCount = 0;
+
+  for (const dir of screenshotDirs) {
+    try {
+      if (!fs.existsSync(dir)) continue;
+      const files = fs.readdirSync(dir);
+      const cutoff = Date.now() - maxAgeMs;
+
+      for (const file of files) {
+        if (!file.endsWith('.png') && !file.endsWith('.jpg')) continue;
+        const filePath = path.join(dir, file);
+        try {
+          const stat = fs.statSync(filePath);
+          if (stat.mtimeMs < cutoff) {
+            fs.unlinkSync(filePath);
+            deletedCount++;
+          }
+        } catch { /* file may have been deleted already */ }
+      }
+    } catch { /* directory may not exist */ }
+  }
+
+  if (deletedCount > 0) {
+    logger.info(`Cleaned ${deletedCount} old screenshots`);
   }
 }
 
@@ -405,11 +451,19 @@ async function syncTaskStatusesTask() {
     logger.debug('Syncing task statuses');
 
     // Find tasks in PROCESSING state that have no active job
+    // Exclude tasks waiting for admin input (ESPERANDO_ADMIN) — those can take longer
     const processingTasks = await prisma.task.findMany({
       where: {
         status: 'PROCESSING',
         startedAt: {
           lt: new Date(Date.now() - 30 * 60 * 1000), // Started over 30 min ago
+        },
+        // Don't kill tasks where admin is actively completing payment in Bancolombia
+        NOT: {
+          resultData: {
+            path: ['awaitingAdmin'],
+            equals: true,
+          },
         },
       },
       take: 50,
@@ -529,6 +583,13 @@ export function startScheduler() {
     timezone: 'America/Bogota',
   });
   logger.info('Scheduled: Check paid planillas (every 2 hours)');
+
+  // Clean old screenshots every hour
+  cron.schedule(SCHEDULES.CLEAN_SCREENSHOTS, cleanOldScreenshotsTask, {
+    name: 'clean-screenshots',
+    timezone: 'America/Bogota',
+  });
+  logger.info('Scheduled: Clean old screenshots (every hour)');
 
   // Run reconciliation every 4 hours
   cron.schedule(SCHEDULES.RECONCILIATION, reconciliationTask, {

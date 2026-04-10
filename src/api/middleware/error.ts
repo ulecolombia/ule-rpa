@@ -15,7 +15,7 @@ export function errorMiddleware(
 ): void {
   logger.error('Request error', {
     error: err.message,
-    stack: err.stack,
+    stack: process.env.NODE_ENV !== 'production' ? err.stack : undefined,
     path: req.path,
   });
 

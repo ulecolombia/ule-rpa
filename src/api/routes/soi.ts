@@ -58,7 +58,7 @@ router.post('/validate-credentials', async (req: Request, res: Response) => {
 
     const { tipoDocumento, documento, password } = validation.data;
 
-    logger.info('Validating SOI credentials', { documento });
+    logger.info('Validating SOI credentials', { documento: `***${documento.slice(-3)}` });
 
     // Crear instancia de auth bot y validar
     const authBot = new SOIAuthBot();
@@ -69,7 +69,7 @@ router.post('/validate-credentials', async (req: Request, res: Response) => {
     });
 
     logger.info('SOI credentials validation result', {
-      documento,
+      documento: `***${documento.slice(-3)}`,
       valid: result.valid,
     });
 
@@ -160,9 +160,9 @@ router.post('/create-account', async (req: Request, res: Response) => {
       data: {
         accountCreated: result.accountCreated,
         message: result.message,
-        // Solo enviar password si se creó la cuenta
+        // Solo enviar datos encriptados (password nunca en plaintext en respuesta)
         ...(encryptedData && {
-          generatedPassword: result.generatedPassword, // Password en texto plano (para mostrar al usuario)
+          passwordStored: true,
           ...encryptedData, // Password encriptada (para guardar en DB)
         }),
       },
@@ -501,7 +501,7 @@ router.post('/activate-account', async (req: Request, res: Response) => {
       }
     );
 
-    logger.info('ACTIVACION task queued', { jobId: job.id, documento });
+    logger.info('ACTIVACION task queued', { jobId: job.id, documento: `***${documento.slice(-3)}` });
 
     return res.json({
       success: true,

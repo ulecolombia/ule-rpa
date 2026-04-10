@@ -73,7 +73,12 @@ const registroSchema = z.object({
 });
 
 router.post('/registro', async (req, res) => {
-  const data = registroSchema.parse(req.body);
+  const validation = registroSchema.safeParse(req.body);
+  if (!validation.success) {
+    res.status(400).json({ error: 'Validation error', details: validation.error.errors });
+    return;
+  }
+  const data = validation.data;
 
   // Check for pending registration task
   const existing = await prisma.task.findFirst({
@@ -121,7 +126,12 @@ const liquidacionSchema = z.object({
 });
 
 router.post('/liquidacion', async (req, res) => {
-  const data = liquidacionSchema.parse(req.body);
+  const validation = liquidacionSchema.safeParse(req.body);
+  if (!validation.success) {
+    res.status(400).json({ error: 'Validation error', details: validation.error.errors });
+    return;
+  }
+  const data = validation.data;
 
   // Verify user is registered in Enlace
   const enlaceUser = await prisma.enlaceUser.findUnique({
@@ -157,7 +167,12 @@ const comprobanteSchema = z.object({
 });
 
 router.post('/comprobante', async (req, res) => {
-  const data = comprobanteSchema.parse(req.body);
+  const validation = comprobanteSchema.safeParse(req.body);
+  if (!validation.success) {
+    res.status(400).json({ error: 'Validation error', details: validation.error.errors });
+    return;
+  }
+  const data = validation.data;
 
   // Verify planilla exists
   const planilla = await prisma.pilaPlanilla.findUnique({

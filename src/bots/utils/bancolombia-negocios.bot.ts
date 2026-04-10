@@ -26,7 +26,7 @@ import { browserManager } from './browser';
 // ============================================
 
 const CONFIG = {
-  usuario: 'Lbrochet01',
+  usuario: process.env.BANCOLOMBIA_USUARIO || 'Lbrochet01',
   timeouts: {
     navigation: 30000,
     element: 10000,

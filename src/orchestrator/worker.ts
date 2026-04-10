@@ -10,6 +10,7 @@ import { logger, createChildLogger } from '../utils/logger';
 // config removed - pilaOperator no longer used after Enlace removal
 import { TaskInput, TaskResult } from '../types';
 import { sessionEvents } from '../services/session-events';
+import { checkCircuit, recordSuccess, recordFailure } from '../services/circuit-breaker';
 
 // SOI imports
 import {
@@ -318,7 +319,8 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
         // ═══════════════════════════════════════════════════════════════
         if (registroExitoso && finalOperator) {
           // Éxito - guardar usuario con el operador correcto
-          const enlaceUser = await prisma.enlaceUser.upsert({
+          // Use transaction to prevent race conditions on concurrent REGISTRO for same user
+          const enlaceUser = await prisma.$transaction(async (tx) => tx.enlaceUser.upsert({
             where: { uleUserId },
             create: {
               uleUserId,
@@ -402,7 +404,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
               })() : {}),
               lastSyncAt: new Date(),
             },
-          });
+          }));
 
           await logTaskProgress(
             task.id,
@@ -884,6 +886,9 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
       // SOI_LIQUIDACION_COMPLETA - Flujo completo: crear planilla + pagar + comprobante
       // ============================================================================
       case 'SOI_LIQUIDACION_COMPLETA': {
+        // Circuit breaker: skip if SOI has too many consecutive failures
+        checkCircuit('SOI');
+
         // Extraer datos con tipo any para flexibilidad
         const jobDataSOI = job.data as any;
         const uleUserIdSOI = jobDataSOI.uleUserId || job.data.uleUserId;
@@ -1004,8 +1009,17 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           const arlCalc = Math.round(ibcSOI * 0.00522);
           const totalCalc = planillaResultSOI.totalPagar || (saludCalc + pensionCalc + arlCalc);
 
-          // Guardar planilla en DB
-          const nuevaPlanillaSOI = await prisma.pilaPlanilla.create({
+          // Idempotency check: si ya existe planilla activa para este numeroPlanilla, reusar
+          const existingPlanillaSOI = planillaResultSOI.numeroPlanilla
+            ? await prisma.pilaPlanilla.findFirst({
+                where: {
+                  numeroPlanilla: planillaResultSOI.numeroPlanilla,
+                  estadoPago: { notIn: ['RECHAZADA', 'VENCIDA'] },
+                },
+              })
+            : null;
+
+          const nuevaPlanillaSOI = existingPlanillaSOI || await prisma.pilaPlanilla.create({
             data: {
               numeroPlanilla: planillaResultSOI.numeroPlanilla || `SOI-${Date.now()}`,
               uleUserId: uleUserIdSOI,
@@ -1023,6 +1037,13 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
               fechaLimite: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 días
             },
           });
+
+          if (existingPlanillaSOI) {
+            logger.info('Planilla already exists in DB, reusing', {
+              numeroPlanilla: existingPlanillaSOI.numeroPlanilla,
+              id: existingPlanillaSOI.id,
+            });
+          }
 
           // PASO 3: Pagar con PSE
           await logTaskProgress(task.id, 'INFO', 'Iniciando pago PSE...');
@@ -1051,6 +1072,12 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
 
           emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Esperando admin en Bancolombia' });
 
+          // Mark task as awaiting admin so scheduler won't kill it
+          await prisma.task.update({
+            where: { id: task.id },
+            data: { resultData: { awaitingAdmin: true } },
+          }).catch(() => {}); // Non-critical update
+
           // Emitir evento específico para el dashboard admin
           const timeoutAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutos
           emitPagoAdminAwaitingInput({
@@ -1068,15 +1095,18 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           await logTaskProgress(task.id, 'INFO', 'Esperando confirmación del admin en Bancolombia...');
 
           await new Promise<void>((resolve, reject) => {
-            const timeout = setTimeout(() => {
-              reject(new Error('Timeout: Admin no confirmó el pago en 10 minutos'));
-            }, 10 * 60 * 1000);
-
-            sessionEvents.once(`payment-confirmed:${task.id}`, () => {
+            const eventName = `payment-confirmed:${task.id}`;
+            const onConfirmed = () => {
               clearTimeout(timeout);
               logger.info('Payment confirmed by admin, continuing with receipt download', { taskId: task.id });
               resolve();
-            });
+            };
+            const timeout = setTimeout(() => {
+              sessionEvents.removeListener(eventName, onConfirmed);
+              reject(new Error('Timeout: Admin no confirmó el pago en 10 minutos'));
+            }, 10 * 60 * 1000);
+
+            sessionEvents.once(eventName, onConfirmed);
           });
 
           await logTaskProgress(task.id, 'INFO', 'Admin confirmó pago - descargando comprobante...');
@@ -1097,6 +1127,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           );
 
           if (comprobanteResultSOI.success) {
+            recordSuccess('SOI');
             await logTaskProgress(task.id, 'INFO', 'Comprobante descargado exitosamente', {
               filePath: comprobanteResultSOI.comprobantePath,
             });
@@ -1137,6 +1168,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
             };
           }
         } catch (error) {
+          recordFailure('SOI');
           const errorMsg = error instanceof Error ? error.message : String(error);
 
           await logTaskProgress(task.id, 'ERROR', 'SOI fallo en liquidacion', { error: errorMsg });
@@ -1173,6 +1205,9 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
       // MI_PLANILLA_LIQUIDACION_COMPLETA - Flujo completo para Mi Planilla
       // ============================================================================
       case 'MI_PLANILLA_LIQUIDACION_COMPLETA': {
+        // Circuit breaker: skip if Mi Planilla has too many consecutive failures
+        checkCircuit('MI_PLANILLA');
+
         const jobDataMP = job.data as any;
         const uleUserIdMP = jobDataMP.uleUserId || job.data.uleUserId;
         const cedulaMP = jobDataMP.cedula || jobDataMP.userData?.numeroDocumento;
@@ -1236,8 +1271,17 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           const arlCalcMP = Math.round(ibcCalcMP * 0.00522);
           const totalCalcMP = flujoResultMP.valorPlanilla || (saludCalcMP + pensionCalcMP + arlCalcMP);
 
-          // Guardar planilla en DB
-          const nuevaPlanillaMP = await prisma.pilaPlanilla.create({
+          // Idempotency check: si ya existe planilla activa para este numeroPlanilla, reusar
+          const existingPlanillaMP = flujoResultMP.numeroPlanilla
+            ? await prisma.pilaPlanilla.findFirst({
+                where: {
+                  numeroPlanilla: flujoResultMP.numeroPlanilla,
+                  estadoPago: { notIn: ['RECHAZADA', 'VENCIDA'] },
+                },
+              })
+            : null;
+
+          const nuevaPlanillaMP = existingPlanillaMP || await prisma.pilaPlanilla.create({
             data: {
               numeroPlanilla: flujoResultMP.numeroPlanilla || `MP-${Date.now()}`,
               uleUserId: uleUserIdMP,
@@ -1256,7 +1300,20 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
             },
           });
 
+          if (existingPlanillaMP) {
+            logger.info('Mi Planilla: Planilla already exists in DB, reusing', {
+              numeroPlanilla: existingPlanillaMP.numeroPlanilla,
+              id: existingPlanillaMP.id,
+            });
+          }
+
           emitTaskUpdate(task.id, { status: 'RUNNING', message: 'Esperando admin en Bancolombia' });
+
+          // Mark task as awaiting admin so scheduler won't kill it
+          await prisma.task.update({
+            where: { id: task.id },
+            data: { resultData: { awaitingAdmin: true } },
+          }).catch(() => {}); // Non-critical update
 
           // Emitir evento para el dashboard admin
           const timeoutAtMP = new Date(Date.now() + 10 * 60 * 1000);
@@ -1275,15 +1332,18 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           await logTaskProgress(task.id, 'INFO', 'Esperando confirmacion del admin en Bancolombia...');
 
           await new Promise<void>((resolve, reject) => {
-            const timeout = setTimeout(() => {
-              reject(new Error('Timeout: Admin no confirmo el pago en 10 minutos'));
-            }, 10 * 60 * 1000);
-
-            sessionEvents.once(`payment-confirmed:${task.id}`, () => {
+            const eventName = `payment-confirmed:${task.id}`;
+            const onConfirmed = () => {
               clearTimeout(timeout);
               logger.info('Mi Planilla: Payment confirmed by admin', { taskId: task.id });
               resolve();
-            });
+            };
+            const timeout = setTimeout(() => {
+              sessionEvents.removeListener(eventName, onConfirmed);
+              reject(new Error('Timeout: Admin no confirmo el pago en 10 minutos'));
+            }, 10 * 60 * 1000);
+
+            sessionEvents.once(eventName, onConfirmed);
           });
 
           await logTaskProgress(task.id, 'INFO', 'Admin confirmo pago - descargando comprobante...');
@@ -1359,6 +1419,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
             };
           }
         } catch (error) {
+          recordFailure('MI_PLANILLA');
           const errorMsg = error instanceof Error ? error.message : String(error);
 
           await logTaskProgress(task.id, 'ERROR', 'Mi Planilla fallo en liquidacion', { error: errorMsg });

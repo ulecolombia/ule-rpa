@@ -86,7 +86,7 @@ export function adminAuthMiddleware(
 
     // Check if client IP matches allowlist
     const isAllowed = allowedIps.some(
-      (allowed) => clientIp === allowed || clientIp.includes(allowed)
+      (allowed) => clientIp === allowed || clientIp.endsWith(`:${allowed}`)
     );
 
     if (!isAllowed) {

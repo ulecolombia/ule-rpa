@@ -1910,7 +1910,7 @@ export const PSE_CONFIG = {
 
   // Credenciales Bancolombia (solo usuario, NUNCA la clave)
   BANCOLOMBIA: {
-    usuario: 'Lbrochet01',
+    usuario: process.env.BANCOLOMBIA_USUARIO || 'Lbrochet01',
     // NOTA: La clave NUNCA debe estar aquí. El admin la ingresa manualmente.
   },
 
@@ -2320,6 +2320,25 @@ export async function esperarPagoYDescargarComprobante(
         urlActual.includes('servicio.soi') ||
         (urlActual.includes('pse.com.co') && !urlActual.includes('botonbancolombia'))
       ) {
+        // URL changed to SOI/PSE — verify it's a success page, not an error redirect
+        const redirectCheck = await page.evaluate(() => {
+          const body = document.body?.innerText?.toLowerCase() || '';
+          return {
+            hasError: body.includes('rechazada') || body.includes('fallida') || body.includes('error en la transacción'),
+            hasSuccess: body.includes('exitosa') || body.includes('aprobada') || body.includes('comprobante'),
+          };
+        });
+
+        if (redirectCheck.hasError) {
+          lastScreenshot = await takeScreenshot(page, 'pago_redirect_error');
+          return {
+            success: false,
+            estado: 'ERROR',
+            error: 'Pago rechazado: banco redirigió con error a SOI',
+            screenshotPath: lastScreenshot,
+          };
+        }
+
         logger.info('[PARTE A] ✅ Pago detectado - URL cambió a SOI/PSE');
         pagoDetectado = true;
         break;
@@ -2940,6 +2959,12 @@ export async function crearPlanillaSOI(
   let lastScreenshot = '';
 
   try {
+    // Validate page is actually in SOI before proceeding
+    const currentUrl = page.url();
+    if (!currentUrl.includes('nuevosoi.com.co') && !currentUrl.includes('nuevoSoiAchColombia')) {
+      throw new Error(`Page is not in SOI (current URL: ${currentUrl.substring(0, 80)}). Cannot create planilla.`);
+    }
+
     // PASO 0: Verificar si ya existe planilla GUARDADA para este periodo
     const existente = await checkPlanillaExistente(page, input);
 

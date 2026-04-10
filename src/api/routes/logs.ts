@@ -35,7 +35,7 @@ router.use(authMiddleware);
 router.get('/task/:taskId', async (req: Request, res: Response): Promise<void> => {
   try {
     const { taskId } = req.params;
-    const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 100, 500));
     const level = req.query.level as string;
     const since = req.query.since as string;
 
@@ -431,7 +431,12 @@ router.get('/stats', async (req: Request, res: Response) => {
  */
 router.delete('/cleanup', async (req: Request, res: Response) => {
   try {
-    const days = Math.max(parseInt(req.query.days as string) || 30, 7);
+    // Require explicit confirmation to prevent accidental deletions
+    if (req.body?.confirm !== true) {
+      res.status(400).json({ error: 'Confirmation required. Send { "confirm": true, "days": N } in body.' });
+      return;
+    }
+    const days = Math.max(parseInt(req.body?.days || req.query.days as string) || 30, 7);
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
     const result = await prisma.taskLog.deleteMany({

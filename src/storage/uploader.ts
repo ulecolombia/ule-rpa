@@ -438,9 +438,18 @@ export async function uploadComprobanteToStorage(
 ): Promise<UploadResult> {
   const result = await storageUploader.uploadComprobante(localPath, metadata);
 
-  // Cleanup solo si upload fue exitoso y cleanup está habilitado
   if (result.success && cleanup) {
+    // Upload succeeded — safe to delete local copy
     await storageUploader.cleanupLocalFile(localPath);
+  } else if (!result.success) {
+    // Upload failed — keep local file as backup and log for manual recovery
+    logger.warn('Upload failed, keeping local file as backup', {
+      localPath,
+      numeroPlanilla: metadata.numeroPlanilla,
+      error: result.error,
+    });
+    // Store localPath in result so caller can persist it in DB
+    (result as any).localBackupPath = localPath;
   }
 
   return result;

@@ -74,7 +74,7 @@ export class SOIAuthBot {
     const creds = credentials || this.getDefaultCredentials();
 
     logger.info('Starting SOI authentication (Independientes)', {
-      usuarioDoc: creds.usuarioNumeroDoc,
+      usuarioDoc: creds.usuarioNumeroDoc ? `***${creds.usuarioNumeroDoc.slice(-3)}` : 'N/A',
     });
 
     const page = await this.initialize();

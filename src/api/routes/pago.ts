@@ -13,6 +13,7 @@ import { logger } from '../../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 import { sessionEvents } from '../../services/session-events';
 import { emitTaskUpdate } from '../websocket';
+import { addTaskToQueue } from '../../orchestrator/queue.config';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -443,12 +444,44 @@ router.post('/iniciar-rpa', async (req: AdminRequest, res: Response) => {
       adminIp: req.admin?.ip,
     });
 
-    // TODO: Actually trigger the RPA bot here via queue
-    // For now, we just create the session record
+    // Determine task type based on user's operator
+    const taskType = planilla.enlaceUser.operador === 'MI_PLANILLA'
+      ? 'MI_PLANILLA_LIQUIDACION_COMPLETA'
+      : 'SOI_LIQUIDACION_COMPLETA';
+
+    // Extract period from planilla (format: "YYYY-MM" or "YYYY-MESNAME")
+    const periodoRaw = planilla.periodo || '';
+    const [anioPago, mesPago] = periodoRaw.includes('-')
+      ? periodoRaw.split('-')
+      : [new Date().getFullYear().toString(), periodoRaw];
+
+    // Enqueue the RPA job
+    const job = await addTaskToQueue(
+      taskType,
+      {
+        type: taskType as any,
+        uleUserId: planilla.uleUserId,
+        cedula: planilla.enlaceUser.numeroDocumento,
+        ibc: planilla.ibc || planilla.ingresoBase,
+        mesPago,
+        anioPago,
+        paymentId: planilla.paymentId || sessionId,
+        pagoAdminSessionId: sessionId,
+      } as any,
+      { priority: 2 }
+    );
+
+    logger.info('RPA job enqueued', {
+      sessionId,
+      planillaId,
+      jobId: job.id,
+      taskType,
+    });
 
     res.json({
       sessionId,
-      message: 'RPA session started',
+      jobId: job.id,
+      message: 'RPA session started and job enqueued',
       status: 'RPA_STARTING',
     });
   } catch (error) {

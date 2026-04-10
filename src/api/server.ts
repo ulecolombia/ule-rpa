@@ -5,6 +5,7 @@
  * FASE 5.2: Integración de WebSocket para tiempo real
  */
 
+import crypto from 'crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -14,7 +15,10 @@ import { logger } from '../utils/logger';
 import { errorMiddleware } from './middleware/error';
 import { initializeWebSocket, closeWebSocket, getWebSocketStats } from './websocket';
 // Enlace/PSE modules removed - only SOI is supported now
-// import { apiLimiter } from './middleware/rateLimit'; // Uncomment to enable rate limiting
+import rateLimit from 'express-rate-limit';
+import { apiLimiter, taskCreationLimiter, webhookLimiter } from './middleware/rateLimit';
+
+const healthLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, message: 'Too many health checks' });
 
 // Import routes
 import tasksRouter from './routes/tasks';
@@ -34,7 +38,7 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        connectSrc: ["'self'", 'ws:', 'wss:'],
+        connectSrc: ["'self'", `ws://localhost:${config.port}`, `wss://rpa.ulecolombia.com`],
       },
     },
   })
@@ -49,14 +53,19 @@ app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Logging middleware
-app.use((req, _res, next) => {
+// Request ID + Logging middleware
+app.use((req, res, next) => {
   // Skip logging for WebSocket polling
   if (req.path.includes('/socket.io/')) {
     return next();
   }
 
+  const requestId = crypto.randomUUID();
+  res.setHeader('X-Request-Id', requestId);
+  (req as any).requestId = requestId;
+
   logger.info('Incoming request', {
+    requestId,
     method: req.method,
     path: req.path,
     ip: req.ip,
@@ -64,11 +73,13 @@ app.use((req, _res, next) => {
   next();
 });
 
-// Rate limiting (opcional - descomentar para habilitar)
-// app.use('/api', apiLimiter);
+// Rate limiting
+app.use('/api', apiLimiter);
+app.use('/api/tasks', taskCreationLimiter);
+app.use('/api/webhooks', webhookLimiter);
 
 // Routes
-app.use('/health', healthRouter);
+app.use('/health', healthLimiter, healthRouter);
 app.use('/api/tasks', tasksRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/admin', adminRouter);

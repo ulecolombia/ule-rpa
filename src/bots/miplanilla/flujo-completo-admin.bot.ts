@@ -310,11 +310,19 @@ export async function ejecutarFlujoCompletoMiPlanilla(
     return result;
 
   } finally {
-    // NO cerrar el browser - el admin debe completar el pago
-    if (result.success) {
-      logger.info('Browser permanece abierto para que admin complete el pago', { sessionId });
+    if (result.success && browser) {
+      // Keep browser open for admin, but schedule cleanup after 30 minutes
+      logger.info('Browser permanece abierto para que admin complete el pago (auto-close in 30min)', { sessionId });
+      setTimeout(async () => {
+        try {
+          if (browser && browser.isConnected()) {
+            logger.warn('Auto-closing browser after 30min timeout', { sessionId });
+            await browser.close();
+          }
+        } catch { /* browser already closed */ }
+      }, 30 * 60 * 1000);
     } else if (browser) {
-      // Solo cerrar si hubo error
+      // Close immediately on error
       await browser.close().catch(() => {});
     }
 

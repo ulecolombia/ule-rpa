@@ -5,6 +5,7 @@
 
 import { Queue, QueueOptions, Job } from 'bullmq';
 import { Redis } from 'ioredis';
+import crypto from 'crypto';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
 import { TaskInput } from '../types';
@@ -42,7 +43,7 @@ const queueOptions: QueueOptions = {
     attempts: 3,
     backoff: {
       type: 'exponential',
-      delay: 2000, // 2s, 4s, 8s
+      delay: 2000 + Math.floor(Math.random() * 1000), // 2-3s base with jitter, then exponential
     },
     removeOnComplete: {
       age: 7 * 24 * 3600, // 7 days
@@ -96,7 +97,7 @@ export async function addRegistroTask(data: TaskInput): Promise<Job> {
     data,
     {
       priority: data.priority || 5,
-      jobId: `registro-${data.uleUserId}-${Date.now()}`,
+      jobId: `registro-${data.uleUserId}-${crypto.randomUUID()}`,
       removeOnComplete: {
         age: 7 * 24 * 3600,
       },
@@ -121,7 +122,7 @@ export async function addLiquidacionTask(data: TaskInput): Promise<Job> {
     data,
     {
       priority: data.priority || 3, // Higher priority for liquidation
-      jobId: `liquidacion-${data.uleUserId}-${data.paymentId}-${Date.now()}`,
+      jobId: `liquidacion-${data.uleUserId}-${data.paymentId}-${crypto.randomUUID()}`,
     } as any
   );
 }
@@ -143,7 +144,7 @@ export async function addComprobanteTask(data: TaskInput): Promise<Job> {
     data,
     {
       priority: data.priority || 7,
-      jobId: `comprobante-${data.numeroPlanilla}-${Date.now()}`,
+      jobId: `comprobante-${data.numeroPlanilla}-${crypto.randomUUID()}`,
     } as any
   );
 }
@@ -164,7 +165,7 @@ export async function addFullFlowTask(data: TaskInput): Promise<Job> {
     data,
     {
       priority: data.priority || 2, // Very high priority
-      jobId: `full-flow-${data.uleUserId}-${Date.now()}`,
+      jobId: `full-flow-${data.uleUserId}-${crypto.randomUUID()}`,
     } as any
   );
 }
@@ -192,7 +193,7 @@ export async function addActivacionTask(
     data,
     {
       priority: options?.priority || data.priority || 6,
-      jobId: `activacion-${data.uleUserId}-${Date.now()}`,
+      jobId: `activacion-${data.uleUserId}-${crypto.randomUUID()}`,
       delay: options?.delay || 0, // Delay antes de procesar (para esperar email de SOI)
       // Retry with longer delays since email might take time to arrive
       attempts: 5,
@@ -235,7 +236,7 @@ export async function addTaskToQueue(
     data,
     {
       priority: options?.priority || data.priority || 5,
-      jobId: options?.jobId || `${taskType.toLowerCase()}-${data.uleUserId}-${Date.now()}`,
+      jobId: options?.jobId || `${taskType.toLowerCase()}-${data.uleUserId}-${crypto.randomUUID()}`,
     } as any
   );
 }

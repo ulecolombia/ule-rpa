@@ -1500,29 +1500,12 @@ router.get('/emergency/user/:uleUserId', async (req: AdminRequest, res: Response
       return;
     }
 
-    // Desencriptar credenciales SOI
-    let soiPassword: string | null = null;
-    if (user.soiPassword && user.soiPasswordIV) {
-      try {
-        soiPassword = decryptPassword(user.soiPassword, user.soiPasswordIV);
-      } catch (e) {
-        soiPassword = '[ERROR AL DESENCRIPTAR]';
-      }
-    }
-
-    // Desencriptar credenciales Mi Planilla
-    let miplanillaPassword: string | null = null;
-    if (user.miplanillaPassword && user.miplanillaPasswordIV) {
-      try {
-        miplanillaPassword = decryptPassword(user.miplanillaPassword, user.miplanillaPasswordIV);
-      } catch (e) {
-        miplanillaPassword = '[ERROR AL DESENCRIPTAR]';
-      }
-    }
+    // Check credential availability (do NOT decrypt or return passwords)
+    const hasSoiCredentials = !!(user.soiPassword && user.soiPasswordIV);
+    const hasMiPlanillaCredentials = !!(user.miplanillaPassword && user.miplanillaPasswordIV);
 
     res.json({
       success: true,
-      warning: '⚠️ INFORMACIÓN SENSIBLE - SOLO PARA OPERACIONES MANUALES DE EMERGENCIA',
 
       usuario: {
         uleUserId: user.uleUserId,
@@ -1537,31 +1520,18 @@ router.get('/emergency/user/:uleUserId', async (req: AdminRequest, res: Response
       },
 
       credenciales: {
-        soi: user.operador === 'SOI' || user.soiPassword ? {
+        soi: (user.operador === 'SOI' || hasSoiCredentials) ? {
           portal: 'https://www.nuevosoi.com.co/independientes',
           tipoDocumento: user.tipoDocumento,
           documento: user.numeroDocumento,
-          password: soiPassword,
+          hasPassword: hasSoiCredentials,
           status: user.soiAccountStatus,
-          instrucciones: [
-            '1. Ir a https://www.nuevosoi.com.co/independientes',
-            '2. Seleccionar tipo documento: ' + user.tipoDocumento,
-            '3. Ingresar documento: ' + user.numeroDocumento,
-            '4. Ingresar contraseña: ' + (soiPassword || '[NO DISPONIBLE]'),
-            '5. Click en Ingresar',
-          ],
         } : null,
 
-        miPlanilla: user.operador === 'MI_PLANILLA' || user.miplanillaPassword ? {
+        miPlanilla: (user.operador === 'MI_PLANILLA' || hasMiPlanillaCredentials) ? {
           portal: 'https://independientes2.miplanilla.com/',
           usuario: 'CC' + user.numeroDocumento,
-          password: miplanillaPassword,
-          instrucciones: [
-            '1. Ir a https://independientes2.miplanilla.com/',
-            '2. Ingresar usuario: CC' + user.numeroDocumento,
-            '3. Ingresar contraseña: ' + (miplanillaPassword || '[NO DISPONIBLE]'),
-            '4. Click en Ingresar',
-          ],
+          hasPassword: hasMiPlanillaCredentials,
         } : null,
       },
 
@@ -1576,24 +1546,6 @@ router.get('/emergency/user/:uleUserId', async (req: AdminRequest, res: Response
           (p.fechaLimite.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
         ),
       })),
-
-      pse: {
-        instrucciones: [
-          '1. Después de login, ir a planillas pendientes',
-          '2. Seleccionar planilla a pagar',
-          '3. Click en "Pagar por PSE"',
-          '4. Seleccionar banco: BANCOLOMBIA',
-          '5. Tipo persona: JURIDICA',
-          '6. NIT: 9020190314',
-          '7. Email: ulecolombia@gmail.com',
-          '8. Continuar a Bancolombia',
-          '9. Usuario Bancolombia: Lbrochet01',
-          '10. Ingresar contraseña y OTP manualmente',
-        ],
-        bancolombiaUser: 'Lbrochet01',
-        nitULE: '9020190314',
-        emailULE: 'ulecolombia@gmail.com',
-      },
     });
   } catch (error) {
     logger.error('Error in emergency user lookup', { error });
@@ -1639,51 +1591,31 @@ router.get('/emergency/users/pending', async (req: AdminRequest, res: Response) 
       },
     });
 
-    const result = await Promise.all(
-      usersWithPending.map(async (user) => {
-        // Desencriptar passwords
-        let password: string | null = null;
-
-        if (user.operador === 'SOI' && user.soiPassword && user.soiPasswordIV) {
-          try {
-            password = decryptPassword(user.soiPassword, user.soiPasswordIV);
-          } catch {
-            password = '[ERROR]';
-          }
-        } else if (user.operador === 'MI_PLANILLA' && user.miplanillaPassword && user.miplanillaPasswordIV) {
-          try {
-            password = decryptPassword(user.miplanillaPassword, user.miplanillaPasswordIV);
-          } catch {
-            password = '[ERROR]';
-          }
-        }
-
-        return {
-          uleUserId: user.uleUserId,
-          nombre: user.nombre,
-          documento: user.numeroDocumento,
-          operador: user.operador,
-          credenciales: {
-            usuario: user.operador === 'MI_PLANILLA' ? 'CC' + user.numeroDocumento : user.numeroDocumento,
-            password,
-          },
-          planillas: user.planillas.map((p) => ({
-            numeroPlanilla: p.numeroPlanilla,
-            periodo: p.periodo,
-            total: p.total,
-            fechaLimite: p.fechaLimite,
-            diasRestantes: Math.ceil(
-              (p.fechaLimite.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
-            ),
-          })),
-          totalPendiente: user.planillas.reduce((sum, p) => sum + p.total, 0),
-        };
-      })
-    );
+    const result = usersWithPending.map((user) => ({
+      uleUserId: user.uleUserId,
+      nombre: user.nombre,
+      documento: user.numeroDocumento,
+      operador: user.operador,
+      credenciales: {
+        usuario: user.operador === 'MI_PLANILLA' ? 'CC' + user.numeroDocumento : user.numeroDocumento,
+        hasPassword: user.operador === 'SOI'
+          ? !!(user.soiPassword && user.soiPasswordIV)
+          : !!(user.miplanillaPassword && user.miplanillaPasswordIV),
+      },
+      planillas: user.planillas.map((p) => ({
+        numeroPlanilla: p.numeroPlanilla,
+        periodo: p.periodo,
+        total: p.total,
+        fechaLimite: p.fechaLimite,
+        diasRestantes: Math.ceil(
+          (p.fechaLimite.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+        ),
+      })),
+      totalPendiente: user.planillas.reduce((sum, p) => sum + p.total, 0),
+    }));
 
     res.json({
       success: true,
-      warning: '⚠️ INFORMACIÓN SENSIBLE - CREDENCIALES DESENCRIPTADAS',
       count: result.length,
       users: result,
       portales: {
@@ -1855,56 +1787,37 @@ router.get('/usuarios/:uleUserId/credenciales', async (req: AdminRequest, res: R
       return;
     }
 
-    // Desencriptar credenciales SOI
-    let soiPassword: string | null = null;
-    if (user.soiPassword && user.soiPasswordIV) {
-      try {
-        soiPassword = decryptPassword(user.soiPassword, user.soiPasswordIV);
-      } catch (e) {
-        soiPassword = '[ERROR AL DESENCRIPTAR]';
-      }
-    }
-
-    // Desencriptar credenciales Mi Planilla
-    let miplanillaPassword: string | null = null;
-    if (user.miplanillaPassword && user.miplanillaPasswordIV) {
-      try {
-        miplanillaPassword = decryptPassword(user.miplanillaPassword, user.miplanillaPasswordIV);
-      } catch (e) {
-        miplanillaPassword = '[ERROR AL DESENCRIPTAR]';
-      }
-    }
+    // Check credential availability (do NOT decrypt or return passwords)
+    const hasSoiCredentials = !!(user.soiPassword && user.soiPasswordIV);
+    const hasMiPlanillaCredentials = !!(user.miplanillaPassword && user.miplanillaPasswordIV);
 
     // ========================================
     // REGISTRAR EN AUDIT LOG
     // ========================================
     await prisma.auditLog.create({
       data: {
-        accion: 'CREDENCIALES_REVELADAS',
+        accion: 'CREDENCIALES_CONSULTADAS',
         adminId: adminIp,
         uleUserId: user.uleUserId,
         ip: adminIp,
         metadata: {
           userAgent,
           timestamp: new Date().toISOString(),
-          tipoDocumento: user.tipoDocumento,
-          numeroDocumento: user.numeroDocumento,
           operador: user.operador,
-          // No guardar las credenciales en el log, solo que fueron accedidas
-          soiCredencialesAccedidas: !!soiPassword,
-          miplanillaCredencialesAccedidas: !!miplanillaPassword,
+          soiCredencialesDisponibles: hasSoiCredentials,
+          miplanillaCredencialesDisponibles: hasMiPlanillaCredentials,
         },
       },
     });
 
-    logger.warn('AUDIT: Credenciales reveladas', {
+    logger.warn('AUDIT: Credenciales consultadas (sin revelar passwords)', {
       uleUserId,
       adminIp,
       operador: user.operador,
     });
 
     // ========================================
-    // RESPUESTA
+    // RESPUESTA (sin passwords)
     // ========================================
     res.json({
       success: true,
@@ -1913,16 +1826,16 @@ router.get('/usuarios/:uleUserId/credenciales', async (req: AdminRequest, res: R
       cedula: user.numeroDocumento,
       operador: user.operador,
 
-      soi: user.soiPassword ? {
+      soi: hasSoiCredentials ? {
         usuario: user.numeroDocumento,
-        password: soiPassword,
+        hasPassword: true,
         tipoDocumento: user.tipoDocumento,
         portal: 'https://www.nuevosoi.com.co/independientes',
       } : null,
 
-      miPlanilla: user.miplanillaPassword ? {
+      miPlanilla: hasMiPlanillaCredentials ? {
         usuario: 'CC' + user.numeroDocumento,
-        password: miplanillaPassword,
+        hasPassword: true,
         portal: 'https://independientes2.miplanilla.com/',
       } : null,
 

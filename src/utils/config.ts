@@ -175,9 +175,19 @@ export const config = {
   },
 
   // Encryption
+  // WARNING: ENCRYPTION_KEY is not set in production. The old default is used for backward
+  // compatibility with existing encrypted passwords. TODO: migrate to ENCRYPTION_SECRET and
+  // re-encrypt all stored passwords in a dedicated migration.
   encryption: {
     key: env.ENCRYPTION_KEY || 'default-key-please-change-in-production',
-    secret: env.ENCRYPTION_SECRET || env.ENCRYPTION_KEY || 'default-secret-change-in-production-32chars',
+    secret: (() => {
+      const s = env.ENCRYPTION_SECRET || env.ENCRYPTION_KEY;
+      if (!s || s.length < 32) {
+        console.error('❌ ENCRYPTION_SECRET is required and must be at least 32 characters. Generate with: openssl rand -hex 32');
+        process.exit(1);
+      }
+      return s;
+    })(),
   },
 
   // Bancolombia PSE (Fase 6)

@@ -162,6 +162,7 @@ model Task {
   @@index([type, status])
   @@index([uleUserId])
   @@index([status, createdAt])
+  @@index([paymentId])
 }
 
 enum TaskType {

@@ -14,7 +14,7 @@ import { config } from '../utils/config';
 import { logger } from '../utils/logger';
 import { errorMiddleware } from './middleware/error';
 import { initializeWebSocket, closeWebSocket, getWebSocketStats } from './websocket';
-// Enlace/PSE modules removed - only SOI is supported now
+import { registerToken } from '../services/socket-tokens';
 import rateLimit from 'express-rate-limit';
 import { apiLimiter, taskCreationLimiter, webhookLimiter } from './middleware/rateLimit';
 
@@ -45,7 +45,7 @@ app.use(
 );
 app.use(
   cors({
-    origin: config.ule.apiUrl,
+    origin: [config.ule.apiUrl, 'http://localhost:3000', 'http://localhost:3001'].filter(Boolean),
     credentials: true,
   })
 );
@@ -77,6 +77,30 @@ app.use((req, res, next) => {
 app.use('/api', apiLimiter);
 app.use('/api/tasks', taskCreationLimiter);
 app.use('/api/webhooks', webhookLimiter);
+
+// Token registration endpoint (ULE backend registers temp tokens for WebSocket auth)
+app.post('/api/admin/auth/register-token', (req, res): void => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey || apiKey !== config.apiKey) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const { token, userId, expiresAt, permissions } = req.body;
+  if (!token || !userId) {
+    res.status(400).json({ error: 'token and userId are required' });
+    return;
+  }
+
+  registerToken({
+    token,
+    userId,
+    expiresAt: expiresAt || Date.now() + 30 * 60 * 1000, // default 30 min
+    permissions: permissions || [],
+  });
+
+  res.json({ success: true, message: 'Token registered' });
+});
 
 // Routes
 app.use('/health', healthLimiter, healthRouter);

@@ -20,6 +20,7 @@ import express from 'express';
 import { logger } from '../utils/logger';
 import { config } from '../utils/config';
 import { getQueueStats } from '../orchestrator/queue.config';
+import { validateToken } from '../services/socket-tokens';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
@@ -65,19 +66,34 @@ export function initializeWebSocket(app: express.Application): HttpServer {
   });
 
   // Authentication middleware for WebSocket
+  // Accepts either: (1) apiKey directly, or (2) temporary token registered via /api/admin/auth/register-token
   io.use((socket: Socket, next: (err?: ExtendedError) => void) => {
+    // Method 1: Direct API key (server-to-server)
     const apiKey = socket.handshake.auth.apiKey || socket.handshake.headers['x-api-key'];
-
-    if (!apiKey || apiKey !== config.apiKey) {
-      logger.warn('WebSocket auth failed', {
-        socketId: socket.id,
-        ip: socket.handshake.address,
-      });
-      return next(new Error('Unauthorized'));
+    if (apiKey && apiKey === config.apiKey) {
+      logger.debug('WebSocket auth via apiKey', { socketId: socket.id });
+      return next();
     }
 
-    logger.debug('WebSocket auth successful', { socketId: socket.id });
-    next();
+    // Method 2: Temporary token (frontend clients via ULE)
+    const token = socket.handshake.auth.token;
+    if (token) {
+      const tokenData = validateToken(token);
+      if (tokenData) {
+        (socket as any).userId = tokenData.userId;
+        (socket as any).permissions = tokenData.permissions;
+        logger.debug('WebSocket auth via token', { socketId: socket.id, userId: tokenData.userId });
+        return next();
+      }
+    }
+
+    logger.warn('WebSocket auth failed', {
+      socketId: socket.id,
+      ip: socket.handshake.address,
+      hasApiKey: !!apiKey,
+      hasToken: !!token,
+    });
+    return next(new Error('Unauthorized'));
   });
 
   // Handle connections

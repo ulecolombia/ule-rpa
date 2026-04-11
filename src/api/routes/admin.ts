@@ -35,7 +35,7 @@ import {
   AlertType,
 } from '../../services/alert.service';
 import { logger } from '../../utils/logger';
-import { decryptPassword } from '../../utils/crypto';
+import { decryptPassword, encryptPassword } from '../../utils/crypto';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -1893,6 +1893,102 @@ router.get('/audit/credenciales', async (req: AdminRequest, res: Response) => {
       success: false,
       error: 'Error interno del servidor',
     });
+  }
+});
+
+// ============================================================================
+// ACTUALIZAR CREDENCIALES (para intervención manual del admin)
+// ============================================================================
+
+/**
+ * PUT /api/admin/usuarios/:uleUserId/credenciales
+ *
+ * Permite al admin actualizar la clave de SOI o Mi Planilla de un usuario.
+ * Caso de uso: el admin cambió la clave manualmente en el portal del operador
+ * y necesita que el RPA tenga la clave actualizada para operar.
+ *
+ * Body:
+ * {
+ *   operador: "SOI" | "MI_PLANILLA",
+ *   password: "nueva-clave-del-usuario"
+ * }
+ */
+router.put('/usuarios/:uleUserId/credenciales', async (req: AdminRequest, res: Response) => {
+  try {
+    const { uleUserId } = req.params;
+    const { operador, password } = req.body;
+    const adminIp = req.admin?.ip || req.ip || 'unknown';
+
+    if (!operador || !password) {
+      res.status(400).json({ error: 'operador y password son requeridos' });
+      return;
+    }
+
+    if (!['SOI', 'MI_PLANILLA'].includes(operador)) {
+      res.status(400).json({ error: 'operador debe ser SOI o MI_PLANILLA' });
+      return;
+    }
+
+    const user = await prisma.enlaceUser.findUnique({ where: { uleUserId } });
+    if (!user) {
+      res.status(404).json({ error: 'Usuario no encontrado' });
+      return;
+    }
+
+    const encrypted = encryptPassword(password);
+
+    if (operador === 'SOI') {
+      await prisma.enlaceUser.update({
+        where: { uleUserId },
+        data: {
+          soiPassword: encrypted.encrypted,
+          soiPasswordIV: encrypted.iv,
+          soiAccountStatus: 'ACTIVE',
+          soiLinkedAt: new Date(),
+        },
+      });
+    } else {
+      await prisma.enlaceUser.update({
+        where: { uleUserId },
+        data: {
+          miplanillaPassword: encrypted.encrypted,
+          miplanillaPasswordIV: encrypted.iv,
+          miplanillaUser: `${user.tipoDocumento || 'CC'}${user.numeroDocumento}`,
+          miplanillaLinkedAt: new Date(),
+        },
+      });
+    }
+
+    // Audit log
+    await prisma.auditLog.create({
+      data: {
+        accion: 'CREDENCIALES_ACTUALIZADAS',
+        adminId: adminIp,
+        uleUserId,
+        ip: adminIp,
+        metadata: {
+          operador,
+          timestamp: new Date().toISOString(),
+          userAgent: req.headers['user-agent'] || 'unknown',
+        },
+      },
+    });
+
+    logger.warn('AUDIT: Admin updated user credentials', {
+      uleUserId,
+      operador,
+      adminIp,
+    });
+
+    res.json({
+      success: true,
+      message: `Credenciales de ${operador} actualizadas para ${user.nombre}`,
+      operador,
+      uleUserId,
+    });
+  } catch (error) {
+    logger.error('Error updating credentials', { error });
+    res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
 

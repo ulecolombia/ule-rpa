@@ -745,8 +745,8 @@ export async function crearCuentaSOI(
         };
       }
 
-      // Verificar error
-      const errorEl = document.querySelector('.alert-danger, .error, .mensaje-error');
+      // Verificar error — check multiple selector patterns used by SOI
+      const errorEl = document.querySelector('.alert-danger, .error, .mensaje-error, [class*="error"], [class*="Error"]');
       if (errorEl) {
         return {
           success: false,
@@ -755,11 +755,21 @@ export async function crearCuentaSOI(
         };
       }
 
-      // Default: asumir éxito si no hay error visible
+      // Also check for PRE- error codes in page text (SOI uses these)
+      const preErrorMatch = bodyText.match(/pre-\d+:?\s*[^.]+/i);
+      if (preErrorMatch) {
+        return {
+          success: false,
+          alreadyExists: false,
+          message: preErrorMatch[0].trim(),
+        };
+      }
+
+      // Default: NO asumir éxito. Si no hay indicador claro, reportar como fallo.
       return {
-        success: true,
+        success: false,
         alreadyExists: false,
-        message: 'Registro procesado. Verificar email para obtener contraseña.',
+        message: 'No se detectó confirmación de registro ni error claro. Página: ' + bodyText.substring(0, 200),
       };
     });
 
@@ -820,30 +830,60 @@ export async function crearCuentaSOI(
 }
 
 // Helper functions
+/**
+ * Select an option from a <select> element.
+ * Normalizes accents/diacritics for matching (e.g. "Bogotá" matches "BOGOTA").
+ * Logs available options and throws if no match found (required fields must not fail silently).
+ */
 async function selectOption(page: Page, selector: string, value: string): Promise<void> {
-  try {
-    await page.waitForSelector(selector, { timeout: 5000 });
-    await page.evaluate(
-      (sel: string, val: string) => {
-        const select = document.querySelector(sel) as HTMLSelectElement;
-        if (select) {
-          const options = Array.from(select.options);
-          const option = options.find(
-            (opt) =>
-              opt.value.toLowerCase().includes(val.toLowerCase()) ||
-              opt.text.toLowerCase().includes(val.toLowerCase())
-          );
-          if (option) {
-            select.value = option.value;
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-        }
-      },
+  await page.waitForSelector(selector, { timeout: 5000 });
+
+  const result = await page.evaluate(
+    (sel: string, val: string) => {
+      // Normalize: remove accents and lowercase
+      function normalize(s: string): string {
+        return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      }
+
+      const select = document.querySelector(sel) as HTMLSelectElement;
+      if (!select) return { matched: false, options: [], error: 'Select element not found' };
+
+      const options = Array.from(select.options)
+        .filter(o => o.value && o.value !== '')
+        .map(o => ({ value: o.value, text: o.text.trim() }));
+
+      const normalVal = normalize(val);
+
+      // Try matching strategies in order:
+      // 1. Exact normalized match on text
+      // 2. Exact normalized match on value
+      // 3. Partial normalized match (includes)
+      let match = options.find(o => normalize(o.text) === normalVal);
+      if (!match) match = options.find(o => normalize(o.value) === normalVal);
+      if (!match) match = options.find(o => normalize(o.text).includes(normalVal) || normalVal.includes(normalize(o.text)));
+      if (!match) match = options.find(o => normalize(o.value).includes(normalVal) || normalVal.includes(normalize(o.value)));
+
+      if (match) {
+        select.value = match.value;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return { matched: true, selected: match, options: [] };
+      }
+
+      // No match — return available options for debugging
+      return { matched: false, options: options.slice(0, 20), error: `No match for "${val}"` };
+    },
+    selector,
+    value
+  );
+
+  if (!result.matched) {
+    const availableOptions = result.options?.map((o: any) => o.text).join(', ') || 'none';
+    logger.error('selectOption: No match found', {
       selector,
-      value
-    );
-  } catch (error) {
-    logger.warn('Could not select option', { selector, value });
+      searchValue: value,
+      availableOptions,
+    });
+    throw new Error(`selectOption: No match for "${value}" in ${selector}. Available: ${availableOptions}`);
   }
 }
 

@@ -171,6 +171,9 @@ enum TaskType {
   COMPROBANTE // Descargar comprobante
   FULL_FLOW // Flujo completo (registro + liquidación)
   PAGO_PSE // Pago por PSE (Fase 6)
+  ACTIVACION // Activar cuenta SOI por email
+  SOI_LIQUIDACION_COMPLETA // Flujo atomico SOI: crear + pagar + comprobante
+  MI_PLANILLA_LIQUIDACION_COMPLETA // Flujo atomico Mi Planilla
 }
 
 enum TaskStatus {

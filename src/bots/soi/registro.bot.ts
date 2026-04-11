@@ -734,9 +734,12 @@ export async function crearCuentaSOI(
       // Verificar éxito
       if (
         bodyText.includes('exitosamente') ||
+        bodyText.includes('registro exitoso') ||
         bodyText.includes('registrado correctamente') ||
         bodyText.includes('cuenta creada') ||
-        bodyText.includes('enviado al correo')
+        bodyText.includes('enviado al correo') ||
+        bodyText.includes('revisa tu correo electrónico') ||
+        bodyText.includes('información de acceso')
       ) {
         return {
           success: true,

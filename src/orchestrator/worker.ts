@@ -217,8 +217,8 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           documento: userData.numeroDocumento,
           nombres: nombreParts[0] || userData.nombre,
           apellidos: nombreParts.slice(1).join(' ') || '',
-          departamento: userData.departamento || 'BOGOTA D.C.',
-          municipio: userData.municipio || 'BOGOTA D.C.',
+          departamento: userData.departamento || 'Bogota distrito capital',
+          municipio: userData.municipio || 'Bogota distrito capital',
           celularUsuario: userData.celular,
           emailUsuario: userData.correo || userData.email,
         };

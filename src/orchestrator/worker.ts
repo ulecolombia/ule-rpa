@@ -422,41 +422,109 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
           // PASO 4: Si es SOI y no hay password, encolar tarea ACTIVACION
           // La cuenta está creada pero pendiente de activación por email
           // ═══════════════════════════════════════════════════════════════
+          // ═══════════════════════════════════════════════════════════════
+          // PASO 4: Si es SOI y no hay password, activar cuenta AQUÍ MISMO
+          // Flujo atómico: esperar email → visitar link → guardar password
+          // NO encolar job separado — evita perder el token por errores intermedios
+          // ═══════════════════════════════════════════════════════════════
           if (finalOperator === 'SOI' && !registroResult.generatedPassword) {
-            jobLogger.info('REGISTRO: Enqueueing ACTIVACION task with 90s delay');
-            await logTaskProgress(task.id, 'INFO', 'Encolando tarea ACTIVACION con delay de 90s', {
+            jobLogger.info('REGISTRO: Starting inline activation (waiting for SOI email)');
+            await logTaskProgress(task.id, 'INFO', 'Esperando email de activación de SOI...', {
               documento: userData.numeroDocumento,
             });
 
-            try {
-              await addActivacionTask(
-                {
-                  type: 'ACTIVACION',
-                  uleUserId: uleUserId,
-                  // Solo pasamos los campos necesarios para ACTIVACION
-                  userData: {
+            const MAX_EMAIL_WAIT_MS = 3 * 60 * 1000; // 3 minutos máximo
+            const POLL_INTERVAL_MS = 15 * 1000; // Cada 15 segundos
+            const startWait = Date.now();
+            let activationDone = false;
+
+            const { getSOIAccountActivationService } = await import('../services/soi-account-activation.service');
+            const activationService = getSOIAccountActivationService();
+
+            while (Date.now() - startWait < MAX_EMAIL_WAIT_MS) {
+              const elapsed = Math.round((Date.now() - startWait) / 1000);
+              jobLogger.info(`REGISTRO: Polling for activation email (${elapsed}s elapsed)`);
+
+              try {
+                const activationResult = await activationService.processActivation({
+                  documento: userData.numeroDocumento,
+                  tipoDocumento: userData.tipoDocumento || 'CC',
+                  nombreCompleto: userData.nombre,
+                });
+
+                if (activationResult.success) {
+                  // Activación exitosa — guardar password si hay
+                  if (activationResult.activation?.generatedPassword) {
+                    const encrypted = encryptPassword(activationResult.activation.generatedPassword);
+                    await prisma.enlaceUser.updateMany({
+                      where: { numeroDocumento: userData.numeroDocumento },
+                      data: {
+                        soiAccountStatus: 'ACTIVE',
+                        soiPassword: encrypted.encrypted,
+                        soiPasswordIV: encrypted.iv,
+                        soiLinkedAt: new Date(),
+                        lastSyncAt: new Date(),
+                      },
+                    });
+                    jobLogger.info('REGISTRO: Activation complete, password saved');
+                  } else {
+                    await prisma.enlaceUser.updateMany({
+                      where: { numeroDocumento: userData.numeroDocumento },
+                      data: {
+                        soiAccountStatus: 'ACTIVE',
+                        soiLinkedAt: new Date(),
+                        lastSyncAt: new Date(),
+                      },
+                    });
+                    jobLogger.info('REGISTRO: Activation complete (no password returned)');
+                  }
+                  await logTaskProgress(task.id, 'INFO', 'Cuenta SOI activada exitosamente', {
+                    passwordSaved: !!activationResult.activation?.generatedPassword,
+                  });
+                  activationDone = true;
+                  break;
+                }
+
+                // Email not found yet — wait and retry
+                if (activationResult.error === 'EMAIL_NOT_FOUND') {
+                  await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+                  continue;
+                }
+
+                // Other error — log but don't break the registration
+                jobLogger.warn('REGISTRO: Activation attempt failed', {
+                  error: activationResult.error,
+                  message: activationResult.message,
+                });
+                break;
+              } catch (activationError) {
+                jobLogger.warn('REGISTRO: Activation poll error', {
+                  error: activationError instanceof Error ? activationError.message : String(activationError),
+                });
+                await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+              }
+            }
+
+            if (!activationDone) {
+              jobLogger.warn('REGISTRO: Activation not completed within timeout, enqueueing fallback ACTIVACION task');
+              await logTaskProgress(task.id, 'WARN', 'Email de activación no llegó en 3 min. Encolando reintento.', {});
+              try {
+                await addActivacionTask(
+                  {
+                    type: 'ACTIVACION',
                     uleUserId: uleUserId,
-                    tipoDocumento: userData.tipoDocumento,
-                    numeroDocumento: userData.numeroDocumento,
-                    nombre: userData.nombre,
-                    email: userData.correo || userData.email || '',
-                    // Campos requeridos por el tipo pero no usados en ACTIVACION
-                    telefono: userData.telefono || '',
-                    direccion: userData.direccion || '',
-                    ciudad: userData.ciudad || '',
-                    eps: userData.eps || '',
-                    pension: userData.pension || '',
-                    arl: userData.arl || '',
+                    userData: {
+                      uleUserId, tipoDocumento: userData.tipoDocumento,
+                      numeroDocumento: userData.numeroDocumento, nombre: userData.nombre,
+                      email: userData.correo || userData.email || '',
+                      telefono: userData.telefono || '', direccion: userData.direccion || '',
+                      ciudad: userData.ciudad || '', eps: userData.eps || '',
+                      pension: userData.pension || '', arl: userData.arl || '',
+                    },
                   },
-                },
-                { delay: 90000 } // 90 segundos para dar tiempo al email de SOI
-              );
-              jobLogger.info('REGISTRO: ACTIVACION task enqueued successfully');
-            } catch (activacionError) {
-              // No fallar el REGISTRO si no se puede encolar ACTIVACION
-              jobLogger.error('REGISTRO: Failed to enqueue ACTIVACION task', {
-                error: activacionError instanceof Error ? activacionError.message : String(activacionError),
-              });
+                  { delay: 60000 }
+                );
+              } catch { /* non-critical */ }
             }
           }
 
@@ -470,7 +538,7 @@ async function processTask(job: Job<TaskInput>): Promise<TaskResult> {
               operator: finalOperator,
               usedFallback: finalOperator === 'MI_PLANILLA',
               soiError: finalOperator === 'MI_PLANILLA' ? soiError : undefined,
-              activacionEnqueued: finalOperator === 'SOI' && !registroResult.generatedPassword,
+              activacionCompleted: finalOperator === 'SOI' && !registroResult.generatedPassword,
             },
             duration: Date.now() - startTime,
           };
